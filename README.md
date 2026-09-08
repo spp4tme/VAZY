@@ -307,9 +307,13 @@ VM « TP14 » prête et démarrée en 12,4 s.
 | `vazy back <nom> <libelle> [--nostart] [--nogui]` | Retour à un instantané manuel, puis redémarrage |
 | `vazy unsnap <nom> <libelle> [--yes]` | Supprime un instantané manuel, après confirmation |
 | `vazy gc [--yes]` | Supprime les VM éphémères éteintes (le nettoyage se fait aussi tout seul au début de chaque commande) |
+| `vazy doctor` | Diagnostic complet : hyperviseur, disque, modèles, VM, cohérence catalogue / disque |
+| `vazy freeze <nom> [--yes]` | Convertit un clone lié en VM complète : elle ne dépend plus du modèle |
 | `vazy lab up <fichier.json>` | Monte un labo entier décrit par un fichier (voir ci-dessous) |
 | `vazy lab status <fichier.json>` | État de chaque machine du labo |
 | `vazy lab down <fichier.json> [--yes] [--stop-only] [--hard]` | Arrête et supprime le labo, après confirmation ; `--stop-only` arrête sans supprimer |
+| `vazy lab export <fichier.json> --labo <nom>\|--prefixe <p>\|--vms a,b,c [--requis]` | Génère le fichier de labo qui recréerait des VM existantes |
+| `vazy template alias <alias> <nom standard> [--rm]` | Fait répondre votre modèle à un nom standard, pour monter un labo partagé |
 | `vazy template add <chemin.vmx> [--name <alias>] [--snapshot <nom>]` | Enregistre un modèle (le dossier de la VM est accepté à la place du `.vmx`) |
 | `vazy template list` | Modèles enregistrés, instantané utilisé, nombre de clones |
 | `vazy template rm <alias>` | Retire un modèle du catalogue ; **aucun fichier n'est supprimé** |
@@ -319,6 +323,15 @@ VM « TP14 » prête et démarrée en 12,4 s.
 | `vazy help`, `vazy version` | |
 
 Codes de retour : `0` succès, `1` erreur, `2` erreur de syntaxe.
+
+**Option générale `--dry-run`** : n'exécute rien, affiche en magenta les commandes `vmrun` exactes qui seraient lancées et les lignes qui seraient écrites dans la configuration des VM. Les lectures (état des VM, instantanés, espace disque) ont bien lieu, sinon il n'y aurait rien à décider. Ni le catalogue ni les fichiers ne sont touchés. Utile pour vérifier avant une opération destructrice, et pour apprendre `vmrun` :
+
+```
+vazy ubuntu-server --name TP20 --ram 4 --dry-run
+vazy lab down tp14-ad.json --yes --dry-run
+```
+
+**Journal** : chaque opération est enregistrée dans `%LOCALAPPDATA%\vazy\journal.log`, avec la ligne de commande vazy, chaque commande `vmrun` lancée (mot de passe remplacé par `***`), son code de retour, sa durée, et chaque écriture dans un fichier de configuration de VM. Le fichier tourne tout seul au-delà de 2 Mo. C'est le premier endroit à regarder quand quelque chose s'est mal passé.
 
 ### Remise à zéro et instantanés
 
@@ -420,6 +433,7 @@ Clés du labo :
 |---|---|---|
 | `labo` | Nom du labo, préfixe de toutes ses VM (32 caractères max, sans espace ni accent) | nom du fichier sans `.json` |
 | `delai` | Secondes d'attente entre deux démarrages, pour ne pas lancer trois Windows dans la même seconde | `5` |
+| `requis` | Modèles attendus, vérifiés avant toute action (labo partagé) | aucun |
 | `machines` | Une entrée par machine : la clé est le nom court de la machine | |
 
 Chaque machine accepte **exactement les mêmes clés que les options de création**, sans les tirets : `modele` (obligatoire), `ram`, `cpu`, `reseau`, `mode`, `set`, `nogui`, `nostart`, `hostname`. Plus une clé propre au labo : `apres`, la ou les machines qui doivent être démarrées avant celle-ci. Détails de forme :
@@ -428,8 +442,10 @@ Chaque machine accepte **exactement les mêmes clés que les options de créatio
 - `set` : un objet `{ "cle": "valeur", ... }` ou une liste `[ "cle=valeur", ... ]`.
 - `apres` : une chaîne ou une liste de noms de machines du fichier.
 - `nogui`, `nostart` : `true` ou `false`.
-- `hostname` : nom d'hôte appliqué dans l'invité (voir « Personnalisation de l'invité »). **Par défaut, le nom court de la machine** (`dc01`). `false` ou `""` pour ne rien appliquer. Sans identifiants enregistrés pour le modèle, la clé est ignorée avec une ligne d'information.
+- `hostname` : nom d'hôte appliqué dans l'invité (voir « Personnalisation de l'invité »). **Par défaut, le nom court de la machine** (`dc01`). `false` ou `""` pour ne rien appliquer. Sans méthode de personnalisation sur le modèle, la clé est ignorée avec une ligne d'information.
 - Une clé inconnue (faute de frappe, `tmp`, `name`) est refusée avant toute action.
+
+Au niveau du labo, la clé `requis` déclare les modèles attendus ; elle est vérifiée avant toute action (voir « Exporter un labo, partager un labo »).
 
 Comportement :
 
@@ -460,6 +476,85 @@ dc01     tp14-ad-dc01    en marche  win2022  4 Go  2    hostonly
 srv01    tp14-ad-srv01   en marche  win2022  2 Go  2    hostonly      dc01
 client   tp14-ad-client  en marche  win11    4 Go  2    nat,hostonly  dc01,srv01
 ```
+
+### Exporter un labo, partager un labo
+
+Monter un TP à la main puis en garder la recette :
+
+```
+vazy lab export tp20.json --prefixe tp20 --requis
+```
+
+vazy lit les VM existantes et écrit le fichier qui les recréerait : modèle, RAM, CPU, réseau, réglages `--set` et nom d'hôte de chacune. Trois façons de désigner les VM à exporter :
+
+| Option | VM concernées |
+|---|---|
+| `--labo <nom>` | Celles montées par un `lab up` précédent (colonne LABO de `vazy list`) |
+| `--prefixe <p>` | Celles dont le nom commence par `p-` (un TP monté à la main en les nommant `tp20-dc01`, `tp20-cli`) |
+| `--vms a,b,c` | Une liste explicite |
+
+Le nom court de chaque machine est son nom de VM sans le préfixe. `--delai <n>` fixe l'attente entre deux démarrages (5 s par défaut), `--yes` remplace un fichier existant sans demander.
+
+L'export **rattache les VM exportées au labo** : elles gardent leur nom, mais `vazy lab up` et `vazy lab down` avec ce fichier les reconnaissent désormais comme les siennes. Sans cela, rejouer le fichier buterait sur « la VM existe déjà mais n'appartient pas à ce labo ». `vazy list` affiche le rattachement dans la colonne LABO.
+
+**`--requis`** ajoute un bloc de prérequis, indispensable si vous partagez le fichier : il décrit les modèles attendus (système, taille de disque déclarée) sous les noms que vous leur donnez. Relisez-le avant d'envoyer le fichier, et remplacez vos noms locaux par des noms standards si vous voulez qu'il soit rejouable par d'autres.
+
+```json
+{
+  "labo": "tp20",
+  "delai": 5,
+  "requis": [
+    { "modele": "win2022", "os": "windows", "version": "2022", "disque_min": 40 }
+  ],
+  "machines": {
+    "dc01": { "modele": "win2022", "ram": 4, "cpu": 2, "mode": "hostonly" }
+  }
+}
+```
+
+À l'autre bout, celui qui reçoit le fichier lance `vazy lab up tp20.json`. **Les prérequis sont vérifiés avant toute action** : si un modèle manque, vazy refuse et dit quoi préparer, sans avoir créé la moindre VM. Le système et la taille de disque déclarés produisent un avertissement s'ils ne correspondent pas, sans bloquer.
+
+Le problème classique : le labo demande `win2022`, mais votre modèle s'appelle `windows-server`. Plutôt que de renommer, déclarez une correspondance locale, une fois pour toutes :
+
+```
+vazy template alias windows-server win2022
+```
+
+Désormais, tout labo qui demande `win2022` utilise votre modèle. `vazy template list` affiche ces noms dans la colonne « AUSSI CONNU COMME », et `--rm` retire la correspondance. Un alias ne peut pas masquer un modèle existant, ni pointer vers deux modèles à la fois.
+
+Ce qui n'est **pas** fait dans cette version : `vazy lab up ad-2022` qui irait chercher le labo dans un dépôt public, `vazy lab search`, `vazy lab publish`. Le format est prêt (bloc `requis`, alias locaux) ; il manque le dépôt et son protocole.
+
+### Diagnostic : `vazy doctor`
+
+Sur un outil qui manipule des clones liés, l'écart entre le catalogue et la réalité du disque est certain, pas probable. `vazy doctor` le rend visible :
+
+```
+vazy doctor
+```
+
+Il vérifie, dans l'ordre : `vmrun` trouvé et qui répond ; Hyper-V ; espace libre de chaque dossier de VM ; chaque modèle (fichier présent, instantané d'ancrage intact, machine bien éteinte, marque de protection, nombre de clones qui en dépendent) ; chaque VM du catalogue (fichiers présents, état, modèle intact, point de retour présent) ; et les machines trouvées dans vos dossiers mais absentes du catalogue. Chaque ligne en échec est suivie de la marche à suivre. Code de retour 1 s'il y a au moins un échec, 0 sinon.
+
+```
+MODÈLE
+  OK     ubuntu-server          instantané « base » présent ; 3 clone(s) lié(s) en dépendent : TP14, TP15, web
+  ECHEC  win2022                fichier introuvable : D:\VMs\win2022\win2022.vmx ; 2 clone(s) lié(s) en dépendent : ad-dc01, ad-cli
+           -> Remettez le modèle à cet emplacement exact, ou restaurez-le depuis une sauvegarde. Sans lui, ses clones liés ne démarrent plus.
+```
+
+### Rendre une VM autonome : `vazy freeze`
+
+Un clone lié ne contient que ses différences par rapport au modèle : c'est ce qui rend la création instantanée, mais il **meurt si le modèle disparaît ou change**. Pour la VM d'un projet que vous voulez garder six mois :
+
+```
+vazy stop projet-web
+vazy freeze projet-web
+```
+
+vazy en fait une copie complète : la VM occupe alors toute sa taille sur le disque (comptez plusieurs minutes de copie), mais ne dépend plus de rien. `vazy list` et `vazy doctor` la signalent comme autonome, et vazy cesse de vérifier son modèle.
+
+Deux points : la VM doit être **arrêtée**, et les instantanés ne survivent pas à une copie complète. vazy reprend donc le point de retour `vazy-neuf` sur l'état courant, qui devient le nouvel état « neuf » ; vos jalons manuels, eux, sont perdus.
+
+**Protection automatique, sans rien faire** : à la création de chaque clone, vazy enregistre l'empreinte des disques de base du modèle (nom, taille, date). Avant chaque démarrage, il la compare. Si le modèle a disparu, été déplacé, ou si l'un de ses instantanés a été supprimé ou consolidé dans VMware Workstation, vazy refuse de démarrer et dit exactement ce qui manque, au lieu de laisser VMware produire une erreur incompréhensible. Les VM créées avant cette version n'ont pas d'empreinte : `vazy doctor` le signale.
 
 **Limite à connaître avant un TP de routage** : le champ `mode` se limite à `nat`, `bridged` et `hostonly`, c'est-à-dire VMnet8, VMnet0 et VMnet1. Les segments réseau personnalisés (VMnet2, VMnet3, ...) sont **hors périmètre** : ils se créent dans le Virtual Network Editor de VMware avec les droits administrateur, et vazy ne les gère pas. Toutes les machines en `hostonly` partagent le même segment VMnet1 ; deux labos en `hostonly` montés en même temps se voient. Si vous avez déjà créé un VMnet personnalisé à la main, une machine peut s'y brancher via `set` (`"set": { "ethernet0.connectionType": "custom", "ethernet0.vnet": "VMnet2" }`), mais vazy ne vérifie ni son existence ni son adressage.
 
@@ -520,6 +615,7 @@ vazy range ses données dans `%LOCALAPPDATA%\vazy\` (`C:\Users\<vous>\AppData\Lo
 | `config.json` | Réglages de l'outil |
 | `catalogue.json` | Modèles enregistrés et VM créées (clé `version` : schéma du fichier ; un catalogue plus ancien est migré automatiquement au premier lancement, sans perte) |
 | `creds\<alias>.xml` | Identifiants d'invité d'un modèle, chiffrés pour votre compte Windows (jamais en clair) |
+| `journal.log` | Trace de chaque opération : commandes `vmrun`, codes de retour, écritures de configuration |
 
 Clés de `config.json`, modifiables avec `vazy config <cle> <valeur>` (valeur `""` pour revenir au défaut) :
 
@@ -574,6 +670,12 @@ Elle tourne encore : fermer sa fenêtre ne l'éteint pas si VMware Workstation e
 
 **« ... VM éphémères éteintes à supprimer : c'est beaucoup pour un nettoyage automatique »**
 Plus de 3 VM éphémères se sont retrouvées éteintes en même temps, ce qui ressemble à une anomalie (coupure, arrêt de l'hôte). Vérifiez avec `vazy list`, puis `vazy gc --yes` pour les supprimer toutes.
+
+**« Le modèle ... a changé depuis la création de ... » au démarrage d'une VM**
+Les disques de base du modèle ne sont plus ceux sur lesquels ce clone lié a été créé. Cause habituelle : un instantané du modèle a été supprimé ou consolidé dans le Snapshot Manager de VMware, ou le disque a été compacté. Le clone est probablement perdu. `vazy doctor` dit quelles VM sont touchées. Pour l'avenir, `vazy freeze` rend autonome une VM que vous tenez à garder.
+
+**« ... modèle(s) requis manquant(s) »** en montant le labo de quelqu'un d'autre
+Le fichier référence un modèle sous un nom que vous n'avez pas. Soit vous le préparez, soit vous avez déjà l'équivalent sous un autre nom : `vazy template alias <votre modèle> <nom attendu>`.
 
 **« Fichier ..., machine « x » : clé inconnue ... » ou « n'est pas du JSON valide »**
 Le fichier de labo est vérifié en entier avant toute action. Le message nomme la machine et la clé fautive ; comparez avec `exemples\tp14-ad.json`. Erreur JSON classique : une virgule après le dernier élément d'un objet ou d'une liste.
@@ -683,6 +785,23 @@ L'invité (personnalisation) :
 | `Wait-MachineOutils -Machine [-DelaiMaxSec]` | `$true` dès que les outils invité répondent, `$false` passé le délai |
 | `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité avec un `PSCredential` (repli) et renvoie son code de sortie ; retente si l'invité n'est pas encore prêt ; le mot de passe n'apparaît dans aucun message |
 
+La protection du modèle et l'autonomie :
+
+| Fonction | Rôle |
+|---|---|
+| `Get-MachineEmpreinte -Machine` | Disques de base de la machine : nom, taille, date |
+| `Test-MachineEmpreinte -Machine -Empreinte` | Compare à une empreinte : erreurs (disque manquant ou modifié) et avertissements |
+| `Convert-MachineEnComplete -Machine -Nom` | Convertit un clone lié en machine complète, au même chemin |
+| `Get-MachineDisqueGo -Machine` | Capacité déclarée des disques, en Go |
+
+L'observation, sur laquelle reposent le journal et `--dry-run` :
+
+| Fonction | Rôle |
+|---|---|
+| `Set-PiloteObservateur -Observateur -Simulation` | L'observateur reçoit `journal` pour chaque commande exécutée, `simulation` pour chaque commande non exécutée |
+
+Toute commande de l'hyperviseur est construite en un seul endroit (`Invoke-Vmrun`) et toute écriture de configuration passe par `Write-FichierVmx` : ce sont les deux seuls points où le journal et la simulation s'accrochent.
+
 La marque « modèle », que le pilote vérifie lui-même avant de démarrer, supprimer ou toucher aux instantanés d'une machine :
 
 | Fonction | Rôle |
@@ -695,7 +814,7 @@ Toute erreur est une exception dont `Data['Conseil']` dit quoi faire ; la couche
 
 ### Ajouter un pilote
 
-1. Créez `lib\pilote-virtualbox.ps1` qui définit ces dix-neuf fonctions avec les mêmes paramètres et les mêmes retours (le chemin de machine devient par exemple celui du `.vbox`, `ExtensionMachine = '.vbox'`).
+1. Créez `lib\pilote-virtualbox.ps1` qui définit ces fonctions avec les mêmes paramètres et les mêmes retours (le chemin de machine devient par exemple celui du `.vbox`, `ExtensionMachine = '.vbox'`).
 2. `vazy config hyperviseur virtualbox`.
 
 Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre à un hyperviseur.

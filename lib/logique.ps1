@@ -15,23 +15,26 @@
 # ============================================================================
 
 $script:NomOutil       = 'vazy'
-$script:VersionOutil   = '1.5.0'
-$script:VersionCatalogue = 6          # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionOutil   = '1.6.0'
+$script:VersionCatalogue = 7          # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
 $script:CheminConfig    = Join-Path $script:DossierDonnees 'config.json'
 $script:CheminCatalogue = Join-Path $script:DossierDonnees 'catalogue.json'
 $script:DossierIdentifiants = Join-Path $script:DossierDonnees 'creds'   # identifiants d'invité par modèle, chiffrés (DPAPI)
+$script:CheminJournal  = Join-Path $script:DossierDonnees 'journal.log'  # trace de chaque opération (voir Write-Journal)
+$script:Simulation     = $false     # --dry-run : rien n'est modifié
 $script:DossierLib     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Config         = $null
 $script:Catalogue      = $null
 $script:Pilote         = $null      # description renvoyée par Initialize-Pilote (chargée à la demande)
 $script:InfosHote      = $null      # résultat de l'interrogation WMI (une seule fois par exécution)
 $script:RappelHyperVFait = $false   # le rappel court Hyper-V a-t-il déjà été affiché dans cette exécution ?
+$script:ApiCheminsChargee = $false  # API Windows de résolution des chemins courts (chargée à la demande)
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
-                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab')
+                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -52,6 +55,51 @@ function Publish-Message {
 function Publish-Etape {
     param([int]$Numero, [int]$Total, [string]$Titre)
     Publish-Message 'etape' ('[{0}/{1}] {2}' -f $Numero, $Total, $Titre)
+}
+
+# ----------------------------------------------------------------------------
+#  Journal et mode simulation (--dry-run)
+#  Chaque opération est écrite dans journal.log avec sa commande complète (mot
+#  de passe masqué par le pilote). En simulation, les commandes qui
+#  modifieraient quelque chose sont affichées au lieu d'être exécutées.
+# ----------------------------------------------------------------------------
+
+function Write-Journal {
+    param([string]$Message)
+    try {
+        if (-not (Test-Path -LiteralPath $script:DossierDonnees)) { New-Item -ItemType Directory -Path $script:DossierDonnees -Force | Out-Null }
+        $ligne = '{0} [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $PID, $Message
+        [System.IO.File]::AppendAllText($script:CheminJournal, $ligne + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+        # Rotation simple : au-delà de 2 Mo, on garde la seconde moitié.
+        $f = Get-Item -LiteralPath $script:CheminJournal -ErrorAction SilentlyContinue
+        if ($f -and $f.Length -gt 2MB) {
+            $lignes = @([System.IO.File]::ReadAllLines($script:CheminJournal))
+            [System.IO.File]::WriteAllLines($script:CheminJournal, @($lignes | Select-Object -Last ([int]($lignes.Count / 2))))
+        }
+    } catch { }   # un journal illisible ne doit jamais empêcher de travailler
+}
+
+# Branche le pilote sur le journal, et active la simulation le cas échéant.
+function Set-ModeSimulation {
+    param([bool]$Actif)
+    $script:Simulation = $Actif
+    Set-PiloteObservateur -Observateur {
+        param($Type, $Message)
+        if ($Type -eq 'simulation') { Publish-Message 'simulation' $Message }
+        else { Write-Journal $Message }
+    } -Simulation $Actif
+}
+
+function Test-Simulation { return $script:Simulation }
+
+# Écriture d'un fichier de données : ignorée en simulation.
+function Assert-PasSimulation {
+    param([string]$Quoi)
+    if ($script:Simulation) {
+        Publish-Message 'simulation' $Quoi
+        return $true
+    }
+    return $false
 }
 
 # Exception "propre" : message (ce qui a raté) + conseil (quoi faire).
@@ -164,6 +212,7 @@ function Read-Config {
 }
 
 function Save-Config {
+    if ($script:Simulation) { return }
     Write-FichierJson -Chemin $script:CheminConfig -Objet $script:Config
 }
 
@@ -184,8 +233,14 @@ function Save-Config {
 #                 script vazy-guestinfo ; la configuration est déposée avant
 #                 chaque démarrage, sans identifiant)
 #               - vms.<nom>.nomHoteApplique retiré (plus de réapplication)
-#   Les entrées gardent toute clé inconnue : de futurs champs (alias de
-#   modèles, empreinte du modèle...) s'ajoutent sans migration destructive.
+#   version 7 : + vms.<nom>.empreinte (disques de base du modèle au moment du
+#                 clonage : nom -> taille et date ; vérifiée avant démarrage)
+#               + vms.<nom>.sets (réglages bruts --set, pour « lab export »)
+#               + vms.<nom>.autonome (clone complet après « vazy freeze »)
+#               + modeles.<alias>.alias (noms standards de ce modèle, pour les
+#                 prérequis d'un labo partagé : « vazy template alias »)
+#   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
+#   migration destructive.
 function Read-Catalogue {
     $lu = Read-FichierJson -Chemin $script:CheminCatalogue
     $c = New-Dictionnaire
@@ -220,6 +275,12 @@ function Read-Catalogue {
             $vm.Remove('nomHoteApplique')   # v6 : la réapplication après reset/back n'existe plus
             $modifie = $true
         }
+        if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('empreinte')) {
+            $vm['empreinte'] = New-Dictionnaire   # VM d'avant la v7 : empreinte du modèle inconnue
+            $vm['sets'] = @()                     # réglages --set non mémorisés à l'époque
+            $vm['autonome'] = $false
+            $modifie = $true
+        }
     }
     foreach ($alias in @($c['modeles'].Keys)) {
         $m = $c['modeles'][$alias]
@@ -231,12 +292,17 @@ function Read-Catalogue {
             $m['guestinfo'] = $false     # modèle d'avant la v6 : pas de script vazy-guestinfo connu
             $modifie = $true
         }
+        if ($m -is [System.Collections.IDictionary] -and -not $m.Contains('alias')) {
+            $m['alias'] = @()            # noms standards auxquels ce modèle répond (labos partagés)
+            $modifie = $true
+        }
     }
     if ($modifie) { Write-FichierJson -Chemin $script:CheminCatalogue -Objet $c }
     return $c
 }
 
 function Save-Catalogue {
+    if ($script:Simulation) { return }   # --dry-run : le catalogue n'est jamais modifié
     Write-FichierJson -Chemin $script:CheminCatalogue -Objet $script:Catalogue
 }
 
@@ -272,6 +338,7 @@ function Get-CheminsOutil {
     return [ordered]@{
         'Configuration' = $script:CheminConfig
         'Catalogue'     = $script:CheminCatalogue
+        'Journal'       = $script:CheminJournal
         'Hyperviseur'   = $pilote
     }
 }
@@ -363,6 +430,32 @@ function Get-DossierVms {
     return (Split-Path -Parent (Split-Path -Parent $Modele['chemin']))
 }
 
+# Forme longue et canonique d'un chemin : « C:\Users\ANTHON~1.CER\... » et
+# « C:\Users\anthony.cernon\... » désignent le même fichier. Sans cela, une VM
+# du catalogue paraîtrait absente du catalogue lors d'un balayage du disque.
+function Get-CheminLong {
+    param([string]$Chemin)
+    if (-not $Chemin) { return '' }
+    try { $Chemin = [System.IO.Path]::GetFullPath($Chemin) } catch { }
+    if ($Chemin -notmatch '~\d') { return $Chemin }   # pas de forme courte : rien à résoudre
+    if (-not $script:ApiCheminsChargee) {
+        try {
+            Add-Type -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern uint GetLongPathName(string court, System.Text.StringBuilder tampon, uint taille);
+'@ -Name 'Chemins' -Namespace 'Vazy' -ErrorAction Stop
+            $script:ApiCheminsChargee = $true
+        } catch { $script:ApiCheminsChargee = 'echec' }
+    }
+    if ($script:ApiCheminsChargee -ne $true) { return $Chemin }
+    try {
+        $tampon = New-Object System.Text.StringBuilder 32767
+        $n = [Vazy.Chemins]::GetLongPathName($Chemin, $tampon, [uint32]$tampon.Capacity)
+        if ($n -gt 0) { return $tampon.ToString() }
+    } catch { }
+    return $Chemin
+}
+
 # Espace libre du disque qui contient le dossier, en Go ($null si inconnu).
 function Get-EspaceLibreGo {
     param([string]$Dossier)
@@ -404,8 +497,23 @@ function Test-MachineEnCours {
 #  Catalogue : accès
 # ----------------------------------------------------------------------------
 
+# Nom réel d'un modèle : son alias au catalogue, ou un nom standard qu'un
+# modèle local déclare servir (« vazy template alias win2022 windows-server »).
+# C'est ce qui permet de monter le labo d'un camarade sans renommer ses VM.
+function Resolve-AliasModele {
+    param([string]$Alias)
+    if ($script:Catalogue['modeles'].Contains($Alias)) { return $Alias }
+    foreach ($k in @($script:Catalogue['modeles'].Keys)) {
+        foreach ($a in @($script:Catalogue['modeles'][$k]['alias'])) {
+            if ([string]$a -ieq $Alias) { return $k }
+        }
+    }
+    return $Alias
+}
+
 function Get-ModeleDuCatalogue {
     param([string]$Alias)
+    $Alias = Resolve-AliasModele -Alias $Alias
     if ($script:Catalogue['modeles'].Contains($Alias)) { return $script:Catalogue['modeles'][$Alias] }
     $connus = @($script:Catalogue['modeles'].Keys)
     if ($connus.Count -eq 0) {
@@ -413,7 +521,9 @@ function Get-ModeleDuCatalogue {
             "Préparez une VM propre, éteinte, avec un instantané (voir README, « Préparer un modèle »), puis enregistrez-la : vazy template add <chemin de la VM> --name $Alias")
     }
     throw (New-ErreurOutil "Modèle inconnu : « $Alias »." `
-        ('Modèles enregistrés : ' + ($connus -join ', ') + ". Pour en ajouter un : vazy template add <chemin de la VM> --name $Alias"))
+        ("Modèles enregistrés : " + ($connus -join ', ') + ".`n" +
+         "Pour en ajouter un : vazy template add <chemin de la VM> --name $Alias`n" +
+         "Si vous avez déjà un modèle équivalent sous un autre nom : vazy template alias <votre modèle> $Alias"))
 }
 
 function Get-VmDuCatalogue {
@@ -429,6 +539,9 @@ function Get-VmDuCatalogue {
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo = [string]$vm['labo']
             NomHote = [string]$vm['nomHote']
+            Empreinte = $vm['empreinte']
+            Sets = @($vm['sets'])
+            Autonome = ($vm['autonome'] -eq $true)
         }
     }
     if ($script:Catalogue['modeles'].Contains($Nom)) {
@@ -464,6 +577,12 @@ function New-VmDepuisModele {
             "Retirez l'une des deux options.")
     }
     Connect-Pilote | Out-Null
+    # Un labo partagé peut désigner le modèle par un nom standard : on retient
+    # le nom réel au catalogue, pour que la VM ne devienne pas orpheline si
+    # l'alias est retiré plus tard.
+    $demande = $Modele
+    $Modele = Resolve-AliasModele -Alias $Modele
+    if ($Modele -ine $demande) { Publish-Message 'info' "« $demande » désigne votre modèle « $Modele »." }
     $infosModele = Get-ModeleDuCatalogue -Alias $Modele
     $methode = if ($NomHote) { Get-MethodePersonnalisation -Alias $Modele } else { 'aucune' }
 
@@ -582,6 +701,11 @@ function New-VmDepuisModele {
     $fiche['ephemere'] = $false      # posé à $true seulement une fois la VM démarrée (voir ci-dessous)
     $fiche['labo']     = $Labo
     $fiche['nomHote']  = $NomHote    # appliqué à chaque démarrage par vazy (voir Start-VmAvecPersonnalisation)
+    # Empreinte des disques de base du modèle : un clone lié y lit en
+    # permanence. Vérifiée avant chaque démarrage (voir Test-ModeleIntact).
+    $fiche['empreinte'] = Get-MachineEmpreinte -Machine $infosModele['chemin']
+    $fiche['sets']      = @($Brut | ForEach-Object { '{0}={1}' -f $_.Cle, $_.Valeur })   # pour « vazy lab export »
+    $fiche['autonome']  = $false
     $script:Catalogue['vms'][$Nom] = $fiche
     Save-Catalogue
 
@@ -855,6 +979,7 @@ function Test-Labo {
         throw (New-ErreurOutil "Labo « $($Labo.Nom) » : aucune machine dans le fichier." "Ajoutez au moins une entrée sous « machines » dans $($Labo.Fichier) (voir README, section « Fichier de labo »).")
     }
     $ordre = Get-OrdreLabo -Labo $Labo
+    Test-RequisLabo -Labo $Labo
     $modeles = @($Labo.Machines | ForEach-Object { $_.Modele } | Select-Object -Unique)
     foreach ($alias in $modeles) {
         $m = Get-ModeleDuCatalogue -Alias $alias
@@ -881,6 +1006,50 @@ function Test-Labo {
         }
     }
     return $ordre
+}
+
+# Prérequis d'un labo partagé : le fichier vient d'ailleurs et référence des
+# modèles sous des noms standards. On vérifie AVANT toute action, et le
+# message dit exactement quoi préparer (ou quel alias poser).
+function Test-RequisLabo {
+    param($Labo)
+    if (@($Labo.Requis).Count -eq 0) { return }
+    $manquants = @()
+    foreach ($r in $Labo.Requis) {
+        $reel = Resolve-AliasModele -Alias $r.Modele
+        if (-not $script:Catalogue['modeles'].Contains($reel)) {
+            $details = @()
+            if ($r.Os) { $details += "système $($r.Os)" }
+            if ($r.Version) { $details += "version $($r.Version)" }
+            if ($r.DisqueMinGo -gt 0) { $details += ("disque de {0} Go au moins" -f $r.DisqueMinGo) }
+            $manquants += [pscustomobject]@{ Modele = $r.Modele; Details = ($details -join ', ') }
+            continue
+        }
+        # Le modèle existe : on vérifie ce qui est vérifiable sans le démarrer.
+        $fiche = $script:Catalogue['modeles'][$reel]
+        if ($r.Os) {
+            $osReel = Get-SystemeModele -Alias $reel
+            if ($osReel -ne 'inconnu' -and $osReel -ne $r.Os.ToLower()) {
+                Publish-Message 'attention' ("le labo demande « {0} » sous {1} ; votre modèle « {2} » est un {3}." -f $r.Modele, $r.Os, $reel, $osReel)
+            }
+        }
+        if ($r.DisqueMinGo -gt 0 -and (Test-Path -LiteralPath $fiche['chemin'] -PathType Leaf)) {
+            $disque = Get-MachineDisqueGo -Machine $fiche['chemin']
+            if ($disque -gt 0 -and $disque -lt $r.DisqueMinGo) {
+                Publish-Message 'attention' ("le labo demande « {0} » avec au moins {1} Go de disque ; votre modèle « {2} » en déclare {3}." -f $r.Modele, $r.DisqueMinGo, $reel, $disque)
+            }
+        }
+    }
+    if ($manquants.Count -gt 0) {
+        $liste = ($manquants | ForEach-Object { if ($_.Details) { "« $($_.Modele) » ($($_.Details))" } else { "« $($_.Modele) »" } }) -join ', '
+        $connus = @($script:Catalogue['modeles'].Keys)
+        $conseil = "Préparez le ou les modèles manquants (README, « Préparer un modèle »), puis : vazy template add <chemin de la VM> --name <nom>.`n"
+        if ($connus.Count -gt 0) {
+            $conseil += "Si vous avez déjà un modèle équivalent sous un autre nom, faites-le répondre au nom attendu : vazy template alias <votre modèle> $($manquants[0].Modele)`n"
+            $conseil += "Vos modèles : " + ($connus -join ', ') + "."
+        }
+        throw (New-ErreurOutil ("Labo « {0} » : {1} modèle(s) requis manquant(s) : {2}. Aucune VM n'a été créée." -f $Labo.Nom, $manquants.Count, $liste) $conseil)
+    }
 }
 
 # État de chaque machine du labo, plus les VM du catalogue rattachées au labo
@@ -982,7 +1151,7 @@ function Invoke-LaboUp {
         }
         if ($dejaDemarreIci -and $Labo.Delai -gt 0) {
             Publish-Message 'info' ("attente de {0} s avant {1}" -f $Labo.Delai, $m.Nom)
-            Start-Sleep -Seconds $Labo.Delai
+            if (-not $script:Simulation) { Start-Sleep -Seconds $Labo.Delai }
         }
         $apres = if (@($m.Apres).Count -gt 0) { ' (après ' + (@($m.Apres) -join ', ') + ')' } else { '' }
         Publish-Message 'etape' ("Démarrage de {0} -> VM « {1} »{2}" -f $m.Nom, $nomVm, $apres)
@@ -1011,6 +1180,7 @@ function Invoke-LaboDown {
 
     $arretees = 0; $supprimees = 0
     foreach ($s in $cibles) {
+        if ($script:Simulation -and -not $script:Catalogue['vms'].Contains($s.Vm)) { continue }
         if ($StopSeulement) {
             if ($s.Etat -ne 'en marche') { Publish-Message 'info' "« $($s.Vm) » : déjà arrêtée."; continue }
             $chemin = $script:Catalogue['vms'][$s.Vm]['chemin']
@@ -1036,6 +1206,346 @@ function Invoke-LaboDown {
         }
     }
     return [pscustomobject]@{ Nom = $Labo.Nom; Arretees = $arretees; Supprimees = $supprimees; Total = $cibles.Count }
+}
+
+# ----------------------------------------------------------------------------
+#  Export d'un labo : l'inverse de « lab up ». On lit les VM du catalogue et on
+#  reconstruit la description qui les recréerait à l'identique.
+# ----------------------------------------------------------------------------
+
+# Construit la description d'un labo à partir des VM du catalogue :
+#   -Labo <nom>     : les VM rattachées à ce labo (« lab up » précédent)
+#   -Prefixe <p>    : les VM dont le nom commence par « p- » (TP monté à la main)
+#   -Vms <noms>     : une liste explicite
+# Le nom court de chaque machine est le nom de la VM sans son préfixe.
+function Export-Labo {
+    param(
+        [string]$Labo = '',
+        [string]$Prefixe = '',
+        [string[]]$Vms = @(),
+        [int]$Delai = 5,
+        [switch]$AvecRequis
+    )
+    Connect-Pilote | Out-Null
+    $nomLabo = if ($Labo) { $Labo } elseif ($Prefixe) { $Prefixe } else { 'labo' }
+    $choisies = @()
+    if ($Vms.Count -gt 0) {
+        foreach ($n in $Vms) { $choisies += (Get-VmDuCatalogue -Nom $n) }
+    } else {
+        foreach ($n in @($script:Catalogue['vms'].Keys)) {
+            $vm = Get-VmDuCatalogue -Nom $n
+            if ($Labo -and $vm.Labo -ieq $Labo) { $choisies += $vm }
+            elseif ($Prefixe -and $n -ilike ($Prefixe + '-*')) { $choisies += $vm }
+        }
+    }
+    if ($choisies.Count -eq 0) {
+        $conseil = if ($Labo) { "Aucune VM n'est rattachée au labo « $Labo » (colonne LABO de vazy list)." }
+                   elseif ($Prefixe) { "Aucune VM ne commence par « $Prefixe- » (voir vazy list)." }
+                   else { 'Indiquez les VM à exporter.' }
+        throw (New-ErreurOutil "Rien à exporter." ($conseil + "`nUsage : vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c"))
+    }
+
+    $machines = [ordered]@{}
+    $requis = @{}
+    foreach ($vm in ($choisies | Sort-Object Nom)) {
+        $court = $vm.Nom
+        $prefixeReel = if ($Labo) { $Labo } else { $Prefixe }
+        if ($prefixeReel -and $court -ilike ($prefixeReel + '-*')) { $court = $court.Substring($prefixeReel.Length + 1) }
+        $entree = [ordered]@{ modele = $vm.Modele; ram = $vm.RamGo; cpu = $vm.Cpu }
+        $modes = @($vm.Reseau)
+        if ($modes.Count -eq 0) { $entree['reseau'] = 0 }
+        elseif ($modes.Count -eq 1) { $entree['mode'] = $modes[0] }
+        else { $entree['mode'] = $modes }
+        if ($vm.NomHote -and $vm.NomHote -ine $court) { $entree['hostname'] = $vm.NomHote }
+        elseif (-not $vm.NomHote) { $entree['hostname'] = $false }
+        $sets = @($vm.Sets)
+        if ($sets.Count -gt 0) {
+            $objet = [ordered]@{}
+            foreach ($s in $sets) { $i = ([string]$s).IndexOf('='); if ($i -gt 0) { $objet[([string]$s).Substring(0, $i)] = ([string]$s).Substring($i + 1) } }
+            if ($objet.Count -gt 0) { $entree['set'] = $objet }
+        }
+        $machines[$court] = $entree
+        if (-not $requis.ContainsKey($vm.Modele)) {
+            $bloc = [ordered]@{ modele = $vm.Modele }
+            $os = try { Get-SystemeModele -Alias $vm.Modele } catch { 'inconnu' }
+            if ($os -ne 'inconnu') { $bloc['os'] = $os }
+            try {
+                $fiche = Get-ModeleDuCatalogue -Alias $vm.Modele
+                if (Test-Path -LiteralPath $fiche['chemin'] -PathType Leaf) {
+                    $disque = Get-MachineDisqueGo -Machine $fiche['chemin']
+                    if ($disque -gt 0) { $bloc['disque_min'] = [math]::Floor($disque) }
+                }
+            } catch { }
+            $requis[$vm.Modele] = $bloc
+        }
+    }
+    $description = [ordered]@{ labo = $nomLabo; delai = $Delai }
+    if ($AvecRequis) { $description['requis'] = @($requis.Keys | Sort-Object | ForEach-Object { $requis[$_] }) }
+    $description['machines'] = $machines
+
+    # Les VM exportées deviennent celles de ce labo : sans cela, rejouer le
+    # fichier bloquerait sur « la VM existe mais n'appartient pas au labo », et
+    # « lab down » ne les reconnaîtrait pas. Elles gardent leur nom.
+    $adoptees = @()
+    foreach ($vm in $choisies) {
+        if ([string]$vm.Labo -ine $nomLabo) {
+            $script:Catalogue['vms'][$vm.Nom]['labo'] = $nomLabo
+            $adoptees += $vm.Nom
+        }
+    }
+    if ($adoptees.Count -gt 0) {
+        Save-Catalogue
+        Publish-Message 'info' ("{0} VM rattachée(s) au labo « {1} » : {2}. Elles seront désormais gérées par vazy lab up / down avec ce fichier." -f $adoptees.Count, $nomLabo, ($adoptees -join ', '))
+    }
+    return [pscustomobject]@{ Description = $description; Machines = @($machines.Keys); Nom = $nomLabo; Adoptees = $adoptees }
+}
+
+# ----------------------------------------------------------------------------
+#  Diagnostic : la dérive entre le catalogue et le disque est certaine, pas
+#  probable. « doctor » la rend visible.
+#  Renvoie une liste de constats : Categorie, Etat (ok | attention | erreur),
+#  Objet, Message, Conseil.
+# ----------------------------------------------------------------------------
+
+function Invoke-Doctor {
+    $constats = New-Object 'System.Collections.Generic.List[object]'
+    function Ajouter([string]$Categorie, [string]$Etat, [string]$Objet, [string]$Message, [string]$Conseil = '') {
+        $constats.Add([pscustomobject]@{ Categorie = $Categorie; Etat = $Etat; Objet = $Objet; Message = $Message; Conseil = $Conseil })
+    }
+
+    # --- Hyperviseur ---------------------------------------------------------
+    $pilote = $null
+    try {
+        $pilote = Connect-Pilote
+        Ajouter 'Hyperviseur' 'ok' $pilote.Nom $pilote.Executable
+    } catch {
+        Ajouter 'Hyperviseur' 'erreur' 'introuvable' $_.Exception.Message ([string]$_.Exception.Data['Conseil'])
+    }
+    if ($pilote) {
+        try {
+            $enCours = @(Get-MachineEnCours)
+            Ajouter 'Hyperviseur' 'ok' 'dialogue' ("répond ; {0} machine(s) en marche" -f $enCours.Count)
+        } catch {
+            Ajouter 'Hyperviseur' 'erreur' 'dialogue' $_.Exception.Message ([string]$_.Exception.Data['Conseil'])
+        }
+    }
+
+    # --- Hyper-V -------------------------------------------------------------
+    $infos = Get-InfosHote
+    if ($infos.HyperviseurPresent -eq $true -and (-not $pilote -or $pilote.SensibleHyperV)) {
+        Ajouter 'Hôte' 'attention' 'Hyper-V' 'actif : VMware tourne en mode dégradé (VM plus lentes, pas de virtualisation imbriquée)' 'Invite de commandes administrateur puis redémarrage : bcdedit /set hypervisorlaunchtype off (WSL2 et Docker Desktop cesseront de fonctionner). Voir README, section Hyper-V.'
+    } elseif ($infos.HyperviseurPresent -eq $false) {
+        Ajouter 'Hôte' 'ok' 'Hyper-V' 'inactif : VMware a la main sur le processeur'
+    }
+    if ($infos.RamPhysiqueGo -gt 0) { Ajouter 'Hôte' 'ok' 'mémoire' ("{0} Go de RAM physique" -f $infos.RamPhysiqueGo) }
+
+    # --- Espace disque -------------------------------------------------------
+    $dossiers = New-Object 'System.Collections.Generic.List[string]'
+    if ($script:Config['dossierVms']) { $dossiers.Add([Environment]::ExpandEnvironmentVariables($script:Config['dossierVms'])) }
+    foreach ($alias in @($script:Catalogue['modeles'].Keys)) {
+        try { $d = Get-DossierVms -Modele $script:Catalogue['modeles'][$alias]; if ($dossiers -notcontains $d) { $dossiers.Add($d) } } catch { }
+    }
+    foreach ($d in $dossiers) {
+        $libre = Get-EspaceLibreGo -Dossier $d
+        if ($null -eq $libre) { Ajouter 'Disque' 'attention' $d 'espace libre impossible à mesurer' 'Le dossier existe-t-il encore ?' }
+        elseif ($libre -lt 10) { Ajouter 'Disque' 'erreur' $d ("{0:0.#} Go libres" -f $libre) 'Il n''y a plus de quoi créer une VM. Libérez de la place, ou changez de dossier : vazy config dossierVms <chemin>' }
+        elseif ($libre -lt 30) { Ajouter 'Disque' 'attention' $d ("{0:0.#} Go libres" -f $libre) 'De quoi tenir encore quelques VM seulement.' }
+        else { Ajouter 'Disque' 'ok' $d ("{0:0.#} Go libres" -f $libre) }
+    }
+
+    # --- Modèles -------------------------------------------------------------
+    $enCours = @()
+    if ($pilote) { try { $enCours = @(Get-MachineEnCours) } catch { } }
+    foreach ($alias in @($script:Catalogue['modeles'].Keys)) {
+        $m = $script:Catalogue['modeles'][$alias]
+        $chemin = [string]$m['chemin']
+        $clones = @()
+        foreach ($n in $script:Catalogue['vms'].Keys) {
+            if ($script:Catalogue['vms'][$n]['modele'] -ieq $alias -and $script:Catalogue['vms'][$n]['autonome'] -ne $true) { $clones += $n }
+        }
+        $suffixe = if ($clones.Count -gt 0) { " ; {0} clone(s) lié(s) en dépendent : {1}" -f $clones.Count, ($clones -join ', ') } else { ' ; aucun clone lié' }
+        if (-not (Test-Path -LiteralPath $chemin -PathType Leaf)) {
+            Ajouter 'Modèle' 'erreur' $alias ("fichier introuvable : $chemin" + $suffixe) "Remettez le modèle à cet emplacement exact, ou restaurez-le depuis une sauvegarde. Sans lui, ses clones liés ne démarrent plus. S'il a été déplacé volontairement : vazy template rm $alias puis vazy template add <nouveau chemin> --name $alias"
+            continue
+        }
+        $etatModele = 'ok'; $messages = @()
+        foreach ($c in $enCours) { if ($c -ieq $chemin) { $etatModele = 'erreur'; $messages += 'EN MARCHE (un modèle ne se démarre jamais)' } }
+        if (-not (Test-MachineModele -Machine $chemin)) {
+            if ($etatModele -eq 'ok') { $etatModele = 'attention' }
+            $messages += 'marque de protection absente'
+        }
+        try {
+            $instantanes = @(Get-MachineInstantanes -Machine $chemin)
+            if ($instantanes -cnotcontains [string]$m['instantane']) {
+                $etatModele = 'erreur'
+                $messages += ("instantané « {0} » absent (présents : {1})" -f $m['instantane'], $(if ($instantanes.Count) { $instantanes -join ', ' } else { 'aucun' }))
+            } else {
+                $messages += ("instantané « {0} » présent" -f $m['instantane'])
+            }
+        } catch {
+            $etatModele = 'erreur'; $messages += "instantanés illisibles : $($_.Exception.Message)"
+        }
+        $conseil = ''
+        if ($etatModele -eq 'erreur') {
+            $conseil = "Éteignez le modèle s'il tourne. Si son instantané a disparu, les clones liés existants sont probablement perdus : recréez l'instantané puis ré-enregistrez le modèle (vazy template rm $alias ; vazy template add ""$chemin"" --snapshot <nom>)."
+        } elseif ($etatModele -eq 'attention') {
+            $conseil = "La marque se repose seule au prochain lancement ; si elle disparaît de nouveau, vérifiez les droits sur le dossier du modèle."
+        }
+        Ajouter 'Modèle' $etatModele $alias (($messages -join ' ; ') + $suffixe) $conseil
+    }
+    if (@($script:Catalogue['modeles'].Keys).Count -eq 0) {
+        Ajouter 'Modèle' 'attention' '(aucun)' 'aucun modèle enregistré' 'Préparez-en un (README, « Préparer un modèle ») puis : vazy template add <chemin de la VM>'
+    }
+
+    # --- VM du catalogue -----------------------------------------------------
+    $dossiersConnus = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        $vm = Get-VmDuCatalogue -Nom $nom
+        if ($vm.Dossier) { $dossiersConnus.Add([string]$vm.Dossier) }
+        if (-not (Test-Path -LiteralPath $vm.Chemin -PathType Leaf)) {
+            Ajouter 'VM' 'erreur' $nom "fichiers disparus : $($vm.Chemin)" "Supprimée en dehors de vazy. Retirez la fiche : vazy rm $nom"
+            continue
+        }
+        $messages = @(); $etat = 'ok'
+        $enMarche = $false
+        foreach ($c in $enCours) { if ($c -ieq $vm.Chemin) { $enMarche = $true } }
+        $messages += $(if ($enMarche) { 'en marche' } else { 'arrêtée' })
+        if ($vm.Autonome) { $messages += 'autonome (clone complet)' }
+        else {
+            if (-not $script:Catalogue['modeles'].Contains($vm.Modele)) {
+                $etat = 'attention'; $messages += "modèle « $($vm.Modele) » retiré du catalogue"
+            } else {
+                $cheminModele = [string]$script:Catalogue['modeles'][$vm.Modele]['chemin']
+                if (-not (Test-Path -LiteralPath $cheminModele -PathType Leaf)) {
+                    $etat = 'erreur'; $messages += "modèle « $($vm.Modele) » introuvable : la VM ne démarrera pas"
+                } elseif ($vm.Empreinte -and @($vm.Empreinte.Keys).Count -gt 0) {
+                    $bilan = Test-MachineEmpreinte -Machine $cheminModele -Empreinte $vm.Empreinte
+                    if ($bilan.Erreurs.Count -gt 0) { $etat = 'erreur'; $messages += $bilan.Erreurs }
+                    elseif ($bilan.Attentions.Count -gt 0) { if ($etat -eq 'ok') { $etat = 'attention' }; $messages += $bilan.Attentions }
+                } else {
+                    if ($etat -eq 'ok') { $etat = 'attention' }
+                    $messages += 'créée avant le suivi du modèle : intégrité non vérifiable'
+                }
+            }
+            if ($vm.InstantaneNeuf) {
+                try {
+                    $s = @(Get-MachineInstantanes -Machine $vm.Chemin)
+                    if ($s -cnotcontains $vm.InstantaneNeuf) { if ($etat -eq 'ok') { $etat = 'attention' }; $messages += "point de retour « $($vm.InstantaneNeuf) » absent" }
+                } catch { }
+            }
+        }
+        if ($vm.Ephemere) { $messages += 'éphémère' }
+        $conseil = ''
+        if ($etat -eq 'erreur') { $conseil = "Le modèle a changé ou disparu : cette VM ne peut plus démarrer. Restaurez le modèle, ou supprimez la VM (vazy rm $nom). Pour l'avenir : vazy freeze <nom> rend une VM importante autonome." }
+        elseif ($messages -contains "point de retour « $($vm.InstantaneNeuf) » absent") { $conseil = "Pour le recréer, VM éteinte : vazy stop $nom ; vazy snap $nom $($script:InstantaneNeuf)" }
+        Ajouter 'VM' $etat $nom ($messages -join ' ; ') $conseil
+    }
+
+    # --- VM présentes sur le disque mais absentes du catalogue ---------------
+    if ($pilote) {
+        $racines = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($d in $dossiers) { if (Test-Path -LiteralPath $d) { $racines.Add($d) } }
+        $cheminsConnus = @()
+        foreach ($nom in @($script:Catalogue['vms'].Keys)) { $cheminsConnus += (Get-CheminLong ([string]$script:Catalogue['vms'][$nom]['chemin'])) }
+        foreach ($alias in @($script:Catalogue['modeles'].Keys)) { $cheminsConnus += (Get-CheminLong ([string]$script:Catalogue['modeles'][$alias]['chemin'])) }
+        $inconnues = @()
+        foreach ($racine in $racines) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $racine -Filter ('*' + $pilote.ExtensionMachine) -File -Recurse -Depth 1 -ErrorAction SilentlyContinue)) {
+                $chemin = Get-CheminLong $f.FullName
+                $connue = $false
+                foreach ($c in $cheminsConnus) { if ($c -ieq $chemin) { $connue = $true } }
+                if (-not $connue) { $inconnues += $chemin }
+            }
+        }
+        if ($inconnues.Count -gt 0) {
+            Ajouter 'Cohérence' 'attention' 'VM hors catalogue' (("{0} machine(s) trouvée(s) dans vos dossiers mais absentes du catalogue : " -f $inconnues.Count) + ($inconnues -join ' ; ')) 'Créées en dehors de vazy, ou restes d''une suppression interrompue. vazy ne les touchera jamais ; supprimez-les dans VMware Workstation si elles ne servent plus.'
+        } else {
+            Ajouter 'Cohérence' 'ok' 'disque et catalogue' 'aucune machine inconnue dans les dossiers de vazy'
+        }
+    }
+
+    return $constats.ToArray()
+}
+
+# ----------------------------------------------------------------------------
+#  Protection du modèle : un clone lié lit en permanence dans les disques de
+#  base de son modèle. Si le modèle disparaît, est déplacé, ou si l'un de ses
+#  instantanés a été supprimé ou consolidé dans VMware, tous ses clones
+#  meurent d'un coup. On vérifie avant chaque démarrage.
+# ----------------------------------------------------------------------------
+
+# Refuse le démarrage d'un clone lié dont le modèle a disparu ou changé.
+# Une VM autonome (vazy freeze) ne dépend plus de rien : rien à vérifier.
+function Test-ModeleIntact {
+    param([Parameter(Mandatory = $true)]$Vm)
+    if ($Vm.Autonome) { return }
+    if (-not $script:Catalogue['modeles'].Contains($Vm.Modele)) {
+        # Modèle retiré du catalogue : les fichiers sont peut-être toujours là.
+        Publish-Message 'attention' "le modèle « $($Vm.Modele) » de cette VM n'est plus au catalogue : impossible de vérifier qu'il est intact. Si ses fichiers ont disparu, la VM ne démarrera pas."
+        return
+    }
+    $modele = $script:Catalogue['modeles'][$Vm.Modele]
+    $cheminModele = [string]$modele['chemin']
+    if (-not (Test-Path -LiteralPath $cheminModele -PathType Leaf)) {
+        throw (New-ErreurOutil "Le modèle « $($Vm.Modele) » de la VM « $($Vm.Nom) » est introuvable : $cheminModele" `
+            ("Cette VM est un clone lié : elle lit en permanence les disques du modèle et ne peut pas démarrer sans lui.`n" +
+             "Si le modèle a été déplacé, remettez-le à cet emplacement exact, ou restaurez-le depuis une sauvegarde.`n" +
+             "Pour vérifier l'état général : vazy doctor. Pour rendre une VM autonome à l'avenir : vazy freeze <nom>"))
+    }
+    $empreinte = $Vm.Empreinte
+    if ($null -eq $empreinte -or @($empreinte.Keys).Count -eq 0) { return }   # VM d'avant la v7 : rien à comparer
+    $bilan = Test-MachineEmpreinte -Machine $cheminModele -Empreinte $empreinte
+    foreach ($a in $bilan.Attentions) { Publish-Message 'attention' $a }
+    if ($bilan.Erreurs.Count -gt 0) {
+        throw (New-ErreurOutil ("Le modèle « {0} » a changé depuis la création de « {1} » : {2}" -f $Vm.Modele, $Vm.Nom, ($bilan.Erreurs -join ' ; ')) `
+            ("Un clone lié lit dans les disques du modèle : s'ils changent, il casse. Cause habituelle : un instantané du modèle a été supprimé ou consolidé dans VMware Workstation (Snapshot Manager), ou le disque a été compacté.`n" +
+             "Si vous avez une sauvegarde du modèle, restaurez-la. Sinon cette VM est probablement perdue : vazy rm $($Vm.Nom).`n" +
+             "Pour l'ensemble : vazy doctor. Pour protéger une VM importante à l'avenir : vazy freeze <nom>"))
+    }
+}
+
+# Convertit un clone lié en VM complète : elle ne dépend plus du modèle, mais
+# occupe toute sa taille sur le disque. VM arrêtée obligatoire ; les
+# instantanés ne survivent pas, le point de retour est repris ensuite.
+function Convert-VmEnAutonome {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    Connect-Pilote | Out-Null
+    $vm = Get-VmPresente -Nom $Nom
+    if ($vm.Autonome) {
+        Publish-Message 'info' "La VM « $($vm.Nom) » est déjà autonome : elle ne dépend d'aucun modèle."
+        return $vm
+    }
+    if (Test-MachineEnCours -Chemin $vm.Chemin) {
+        throw (New-ErreurOutil "La VM « $($vm.Nom) » est en marche : une conversion en VM complète exige une VM arrêtée." "Arrêtez-la puis recommencez : vazy stop $($vm.Nom) ; vazy freeze $($vm.Nom)")
+    }
+    $instantanes = @(Get-MachineInstantanes -Machine $vm.Chemin)
+    $avaitNeuf = ($instantanes -ccontains $script:InstantaneNeuf)
+    Publish-Etape 1 3 "Copie complète du disque"
+    Publish-Message 'info' "la VM va occuper toute sa taille sur le disque au lieu de ses seules différences ; cela peut prendre plusieurs minutes."
+    Convert-MachineEnComplete -Machine $vm.Chemin -Nom $vm.Nom | Out-Null
+    Publish-Message 'ok' ("copie terminée en {0}" -f (Format-Duree $chrono.Elapsed.TotalSeconds))
+
+    Publish-Etape 2 3 "Point de retour"
+    if ($avaitNeuf) {
+        # Un clone complet ne conserve pas les instantanés : on reprend le point
+        # de retour sur l'état actuel, qui devient le nouvel état « neuf ».
+        try {
+            New-MachineInstantane -Machine $vm.Chemin -Nom $script:InstantaneNeuf
+            Publish-Message 'ok' "« $($script:InstantaneNeuf) » repris sur l'état actuel de la VM (les instantanés ne survivent pas à une copie complète)."
+        } catch {
+            Publish-Message 'attention' "point de retour non repris ($($_.Exception.Message)). Pour le recréer, VM éteinte : vazy snap $($vm.Nom) $($script:InstantaneNeuf)"
+        }
+    } else {
+        Publish-Message 'info' 'aucun point de retour à reprendre.'
+    }
+
+    Publish-Etape 3 3 "Catalogue"
+    $script:Catalogue['vms'][$vm.Nom]['autonome'] = $true
+    $script:Catalogue['vms'][$vm.Nom]['empreinte'] = New-Dictionnaire
+    Save-Catalogue
+    Publish-Message 'ok' "VM « $($vm.Nom) » autonome : elle ne dépend plus du modèle « $($vm.Modele) »."
+    return [pscustomobject]@{ Nom = $vm.Nom; Duree = $chrono.Elapsed.TotalSeconds }
 }
 
 # ----------------------------------------------------------------------------
@@ -1226,6 +1736,7 @@ function Start-VmAvecPersonnalisation {
         [switch]$SansInterface,
         [string]$TitreEtapeIdentifiants = "Personnalisation de l'invité (repli par identifiants)"
     )
+    Test-ModeleIntact -Vm $Vm
     $modele = Get-ModeleDuCatalogue -Alias $Vm.Modele
     $methode = if ($Vm.NomHote) { Get-MethodePersonnalisation -Alias $Vm.Modele } else { 'aucune' }
     if ($Vm.NomHote) {
@@ -1544,6 +2055,7 @@ function Add-Modele {
     $fiche['ajouteLe']   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
     $fiche['os']         = ''      # système invité, détecté par le pilote ou précisé par « template creds --os »
     $fiche['guestinfo']  = $false  # « vazy template mark <alias> --guestinfo » une fois le script installé dans le modèle
+    $fiche['alias']      = @()     # noms standards servis par ce modèle (« vazy template alias »)
     $script:Catalogue['modeles'][$Alias] = $fiche
     Save-Catalogue
     # Marque de protection vérifiée par le pilote lui-même (démarrage,
@@ -1570,6 +2082,7 @@ function Get-ListeModeles {
             Invite     = (Get-UtilisateurInvite -Alias $alias)
             Guestinfo  = ($m['guestinfo'] -eq $true)
             Methode    = (Get-MethodePersonnalisation -Alias $alias)
+            NomsStandards = @($m['alias'])
         }
     }
     return $liste   # l'appelant entoure de @() : vide -> tableau vide
@@ -1599,6 +2112,41 @@ function Remove-Modele {
     if ($clones.Count -gt 0) {
         Publish-Message 'attention' ("{0} VM en dépendent toujours ({1}) : ne supprimez pas ses fichiers ni son instantané, sinon elles cassent." -f $clones.Count, ($clones -join ', '))
     }
+}
+
+# Ajoute ou retire un nom standard servi par un modèle local.
+function Set-AliasModele {
+    param(
+        [Parameter(Mandatory = $true)][string]$Modele,
+        [Parameter(Mandatory = $true)][string]$NomStandard,
+        [switch]$Retirer
+    )
+    $reel = Resolve-AliasModele -Alias $Modele
+    $fiche = Get-ModeleDuCatalogue -Alias $reel
+    Test-NomValide -Nom $NomStandard -Role 'nom standard'
+    $liste = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($a in @($fiche['alias'])) { if ($a -and $a -ine $NomStandard) { $liste.Add([string]$a) } }
+    if ($Retirer) {
+        $fiche['alias'] = $liste.ToArray()
+        Save-Catalogue
+        Publish-Message 'ok' "Le nom « $NomStandard » ne pointe plus vers le modèle « $reel »."
+        return
+    }
+    if ($script:Catalogue['modeles'].Contains($NomStandard) -and $NomStandard -ine $reel) {
+        throw (New-ErreurOutil "« $NomStandard » est déjà le nom d'un modèle enregistré." "Un alias ne peut pas masquer un modèle existant ; choisissez un autre nom standard.")
+    }
+    foreach ($k in @($script:Catalogue['modeles'].Keys)) {
+        if ($k -ieq $reel) { continue }
+        foreach ($a in @($script:Catalogue['modeles'][$k]['alias'])) {
+            if ([string]$a -ieq $NomStandard) {
+                throw (New-ErreurOutil "Le nom « $NomStandard » pointe déjà vers le modèle « $k »." "Retirez-le d'abord : vazy template alias $k $NomStandard --rm")
+            }
+        }
+    }
+    $liste.Add($NomStandard)
+    $fiche['alias'] = $liste.ToArray()
+    Save-Catalogue
+    Publish-Message 'ok' "Le modèle « $reel » répond désormais au nom « $NomStandard » : un labo qui demande « $NomStandard » utilisera votre modèle."
 }
 
 # ----------------------------------------------------------------------------

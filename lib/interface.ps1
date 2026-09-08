@@ -26,6 +26,7 @@ function Write-MessageOutil {
     param([string]$Type, [string]$Message)
     switch ($Type) {
         'etape'     { Write-Host $Message -ForegroundColor Cyan }
+        'simulation' { Write-Host ('  [simulation] ' + $Message) -ForegroundColor Magenta }
         'ok'        { Write-Host ('      ' + $Message) -ForegroundColor Green }
         'info'      { Write-Host ('      ' + $Message) -ForegroundColor Gray }
         'detail'    { Write-Host ('      ' + $Message) -ForegroundColor DarkGray }
@@ -95,6 +96,9 @@ USAGE
                                      enregistre une VM éteinte, avec instantané, comme modèle
   vazy template list                 modèles enregistrés
   vazy template rm <alias>           retire un modèle du catalogue (aucun fichier supprimé)
+  vazy template alias <alias> <nom standard> [--rm]
+                                     fait répondre votre modèle à un nom standard, pour monter
+                                     un labo partagé sans renommer quoi que ce soit
   vazy template mark <alias> --guestinfo | --classique
                                      modèle guestinfo : le script vazy-guestinfo est installé dedans,
                                      vazy dépose la configuration avant chaque démarrage, sans identifiant
@@ -108,8 +112,16 @@ USAGE
   vazy lab status <fichier.json>     état de chaque machine du labo
   vazy lab down <fichier.json> [--yes] [--stop-only] [--hard]
                                      arrête et supprime tout le labo (--stop-only : arrête sans supprimer)
+  vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
+                                     génère le fichier de labo qui recréerait des VM existantes
+  vazy doctor                        diagnostic : hyperviseur, disque, modèles, VM, cohérence
+  vazy freeze <nom> [--yes]          rend une VM autonome (clone complet : ne dépend plus du modèle)
   vazy config [<cle> <valeur>]       affiche ou modifie la configuration
   vazy help | version
+
+OPTION GÉNÉRALE
+  --dry-run          n'exécute rien : affiche les commandes qui seraient lancées et les
+                     lignes qui seraient écrites (les lectures, elles, ont bien lieu)
 
 OPTIONS DE CRÉATION (toutes facultatives)
   --name <nom>       nom de la VM                 défaut : <modele>-1, <modele>-2, ...
@@ -138,6 +150,8 @@ EXEMPLES
   vazy snap TP14 avant-dhcp          jalon, puis plus tard : vazy back TP14 avant-dhcp
   vazy lab up tp14-ad.json           un fichier décrit le TP entier (voir README, « Fichier de labo »)
   vazy template mark ubuntu-server --guestinfo   puis   vazy ubuntu-server --hostname web1
+  vazy ubuntu-server --dry-run       montre ce qui serait fait, sans rien faire
+  vazy lab export tp14.json --prefixe tp14 --requis
 
 RÈGLE ABSOLUE
   Un modèle ne se démarre jamais et son instantané ne se supprime jamais :
@@ -163,8 +177,10 @@ function New-ErreurUsage {
 # et liste des --set (dans l'ordre). Accepte --option valeur et --option=valeur.
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
-    $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os')
-    $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique')
+    $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os',
+                           'labo', 'prefixe', 'vms', 'delai')
+    $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
+                           'dry-run', 'requis', 'tout')
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
         Options      = @{}
@@ -321,8 +337,34 @@ function Read-FichierLabo {
             $e = New-ErreurOutil "Fichier $fichier : clé inconnue « $($p.Name) » au niveau du labo." ("Clés possibles : " + ($clesLabo -join ', ') + ". " + $conseilFormat); $e.Data['CodeSortie'] = 2; throw $e
         }
     }
-    if ($json.PSObject.Properties['requis']) {
-        Write-MessageOutil -Type 'info' -Message "bloc « requis » présent : les prérequis ne sont pas encore vérifiés par cette version, les modèles doivent exister sous leur nom exact."
+    # Prérequis d'un labo partagé : modèles attendus, vérifiés avant toute action.
+    $requis = @()
+    if ($json.PSObject.Properties['requis'] -and $null -ne $json.requis) {
+        if ($json.requis -isnot [array]) {
+            $e = New-ErreurOutil "Fichier $fichier : « requis » doit être une liste [ { ""modele"": ""..."" }, ... ]." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
+        }
+        $clesRequis = @('modele', 'os', 'version', 'disque_min')
+        foreach ($r in $json.requis) {
+            if ($r -isnot [System.Management.Automation.PSCustomObject] -or -not $r.PSObject.Properties['modele'] -or -not ([string]$r.modele).Trim()) {
+                $e = New-ErreurOutil "Fichier $fichier : chaque entrée de « requis » doit être un objet avec au moins « modele »." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
+            }
+            foreach ($k in $r.PSObject.Properties) {
+                if ($clesRequis -notcontains $k.Name) {
+                    $e = New-ErreurOutil "Fichier $fichier, requis « $($r.modele) » : clé inconnue « $($k.Name) »." ("Clés possibles : " + ($clesRequis -join ', ') + ". " + $conseilFormat); $e.Data['CodeSortie'] = 2; throw $e
+                }
+            }
+            $disqueMin = 0
+            if ($r.PSObject.Properties['disque_min'] -and $null -ne $r.disque_min) {
+                try { $disqueMin = ConvertTo-Entier -Texte ([string]$r.disque_min) -Option 'disque_min' -Min 1 -Max 100000 }
+                catch { $e = New-ErreurOutil "Fichier $fichier, requis « $($r.modele) » : « disque_min » attend un nombre de Go." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e }
+            }
+            $requis += [pscustomobject]@{
+                Modele = ([string]$r.modele).Trim()
+                Os = $(if ($r.PSObject.Properties['os']) { ([string]$r.os).Trim().ToLower() } else { '' })
+                Version = $(if ($r.PSObject.Properties['version']) { ([string]$r.version).Trim() } else { '' })
+                DisqueMinGo = $disqueMin
+            }
+        }
     }
     $nom = if ($json.PSObject.Properties['labo'] -and $json.labo) { ([string]$json.labo).Trim() } else { [System.IO.Path]::GetFileNameWithoutExtension($fichier) }
     if ($nom -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
@@ -396,7 +438,7 @@ function Read-FichierLabo {
             throw $e
         }
     }
-    return [pscustomobject]@{ Nom = $nom; Fichier = $fichier; Delai = $delai; Machines = @($machines) }
+    return [pscustomobject]@{ Nom = $nom; Fichier = $fichier; Delai = $delai; Machines = @($machines); Requis = @($requis) }
 }
 
 function Assert-AucunArgumentEnTrop {
@@ -457,6 +499,10 @@ function Invoke-CommandeCreation {
                                    -SansInterface:$o.ContainsKey('nogui') -SansDemarrage:$o.ContainsKey('nostart') -Ephemere:$o.ContainsKey('tmp') -NomHote $nomHote
 
     Write-Host ''
+    if (Test-Simulation) {
+        Write-Host ('Simulation terminée : la VM « {0} » aurait été créée. Rien n''a été fait.' -f $resultat.Nom) -ForegroundColor Magenta
+        return
+    }
     $etat = if ($resultat.Demarree) { 'prête et démarrée' } else { 'créée (non démarrée)' }
     $tmp = if ($resultat.Ephemere) { ' (éphémère)' } else { '' }
     Write-Host ('VM « {0} » {1} en {2}{3}.' -f $resultat.Nom, $etat, ('{0:0.0} s' -f $resultat.Duree), $tmp) -ForegroundColor Green
@@ -564,17 +610,24 @@ function Invoke-CommandeTemplate {
             $lignes = New-Object 'System.Collections.Generic.List[object]'
             foreach ($m in $modeles) {
                 $methode = switch ($m.Methode) { 'guestinfo' { 'guestinfo' } 'identifiants' { 'identifiants (' + $m.Invite + ')' } default { 'aucune' } }
-                $lignes.Add(@($m.Alias, $m.Instantane, [string]$m.Clones, $(if ($m.Os) { $m.Os } else { '(détecté)' }), $methode, $(if ($m.Present) { $m.Chemin } else { $m.Chemin + '  (INTROUVABLE)' })))
+                $lignes.Add(@($m.Alias, $m.Instantane, [string]$m.Clones, $(if ($m.Os) { $m.Os } else { '(détecté)' }), $methode, (@($m.NomsStandards) -join ','), $(if ($m.Present) { $m.Chemin } else { $m.Chemin + '  (INTROUVABLE)' })))
             }
-            Write-Tableau -EnTetes @('ALIAS', 'INSTANTANÉ', 'CLONES', 'SYSTÈME', 'PERSONNALISATION', 'FICHIER') -Lignes $lignes.ToArray() -Couleurs {
+            Write-Tableau -EnTetes @('ALIAS', 'INSTANTANÉ', 'CLONES', 'SYSTÈME', 'PERSONNALISATION', 'AUSSI CONNU COMME', 'FICHIER') -Lignes $lignes.ToArray() -Couleurs {
                 param($colonne, $valeur)
-                if ($colonne -eq 5 -and $valeur -like '*(INTROUVABLE)') { return 'Red' }
+                if ($colonne -eq 6 -and $valeur -like '*(INTROUVABLE)') { return 'Red' }
                 if ($colonne -eq 4 -and $valeur -eq 'guestinfo') { return 'Green' }
                 return $null
             }
             Write-Host ''
             Write-Host '  PERSONNALISATION : guestinfo (script dans le modèle, sans identifiant : vazy template mark <alias> --guestinfo),' -ForegroundColor Gray
             Write-Host '  identifiants (repli : vazy template creds <alias>), ou aucune.' -ForegroundColor Gray
+            Write-Host '  AUSSI CONNU COMME : noms standards auxquels ce modèle répond dans un labo partagé (vazy template alias <alias> <nom>).' -ForegroundColor Gray
+        }
+        'alias' {
+            $usageAlias = 'Usage : vazy template alias <votre modèle> <nom standard> [--rm]'
+            if ($Analyse.Positionnels.Count -lt 4) { throw (New-ErreurUsage $usageAlias) }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 4
+            Set-AliasModele -Modele $Analyse.Positionnels[2] -NomStandard $Analyse.Positionnels[3] -Retirer:$Analyse.Options.ContainsKey('rm')
         }
         'mark' {
             $usageMark = 'Usage : vazy template mark <alias> --guestinfo   (le script vazy-guestinfo est installé dans le modèle)   |   vazy template mark <alias> --classique'
@@ -630,7 +683,7 @@ function Invoke-CommandeTemplate {
             Remove-Modele -Alias $Analyse.Positionnels[2]
         }
         default {
-            throw (New-ErreurUsage 'Usage : vazy template add <chemin.vmx> [--name <alias>] | vazy template list | vazy template rm <alias> | vazy template mark <alias> --guestinfo|--classique | vazy template creds <alias>')
+            throw (New-ErreurUsage 'Usage : vazy template add <chemin.vmx> [--name <alias>] | vazy template list | vazy template rm <alias> | vazy template mark <alias> --guestinfo|--classique | vazy template alias <alias> <nom standard> | vazy template creds <alias>')
         }
     }
 }
@@ -714,19 +767,87 @@ function Write-TableauLabo {
     }
 }
 
+function Invoke-CommandeDoctor {
+    param($Analyse)
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 1
+    Write-Host 'vazy doctor : état de l''installation, des modèles et des VM' -ForegroundColor White
+    Write-Host ''
+    $constats = @(Invoke-Doctor)
+    $categorie = ''
+    foreach ($c in $constats) {
+        if ($c.Categorie -ne $categorie) {
+            $categorie = $c.Categorie
+            Write-Host ''
+            Write-Host ($categorie.ToUpper()) -ForegroundColor White
+        }
+        $symbole, $couleur = switch ($c.Etat) {
+            'erreur'    { 'ECHEC ', 'Red' }
+            'attention' { 'ALERTE', 'Yellow' }
+            default     { 'OK    ', 'Green' }
+        }
+        Write-Host ('  ' + $symbole + ' ') -NoNewline -ForegroundColor $couleur
+        Write-Host ('{0,-22} {1}' -f $c.Objet, $c.Message)
+        if ($c.Conseil) {
+            foreach ($l in ($c.Conseil -split "`n")) { Write-Host ('           -> ' + $l) -ForegroundColor Yellow }
+        }
+    }
+    $erreurs = @($constats | Where-Object { $_.Etat -eq 'erreur' })
+    $alertes = @($constats | Where-Object { $_.Etat -eq 'attention' })
+    Write-Host ''
+    if ($erreurs.Count -gt 0) {
+        Write-Host ('{0} problème(s) à corriger, {1} avertissement(s).' -f $erreurs.Count, $alertes.Count) -ForegroundColor Red
+        return 1
+    }
+    if ($alertes.Count -gt 0) {
+        Write-Host ('Rien de cassé, {0} avertissement(s).' -f $alertes.Count) -ForegroundColor Yellow
+        return 0
+    }
+    Write-Host 'Tout est en ordre.' -ForegroundColor Green
+    return 0
+}
+
+function Invoke-CommandeFreeze {
+    param($Analyse)
+    if ($Analyse.Positionnels.Count -lt 2) { throw (New-ErreurUsage 'Usage : vazy freeze <nom> [--yes]') }
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 2
+    $vm = Get-VmDuCatalogue -Nom $Analyse.Positionnels[1]
+    if ($vm.Autonome) {
+        Write-Host ('La VM « {0} » est déjà autonome.' -f $vm.Nom) -ForegroundColor Gray
+        return
+    }
+    if (-not $Analyse.Options.ContainsKey('yes')) {
+        Write-Host ('Conversion de « {0} » en VM complète : elle ne dépendra plus du modèle « {1} », mais occupera toute sa taille sur le disque au lieu de ses seules différences.' -f $vm.Nom, $vm.Modele) -ForegroundColor Yellow
+        Write-Host '  La copie peut prendre plusieurs minutes. Les instantanés ne survivent pas : le point de retour est repris sur l''état actuel.' -ForegroundColor Yellow
+        if (-not (Read-Confirmation -Question 'Confirmer ?')) {
+            Write-Host 'Annulé, rien n''a été touché.' -ForegroundColor Gray
+            return
+        }
+    }
+    Write-Host ("vazy : conversion de « {0} » en VM autonome" -f $vm.Nom) -ForegroundColor White
+    $r = Convert-VmEnAutonome -Nom $vm.Nom
+    Write-Host ''
+    Write-Host ('VM « {0} » autonome en {1}.' -f $r.Nom, ('{0:0.0} s' -f $r.Duree)) -ForegroundColor Green
+}
+
 function Invoke-CommandeLab {
     param($Analyse)
-    $usage = 'Usage : vazy lab up <fichier.json> | vazy lab status <fichier.json> | vazy lab down <fichier.json> [--yes] [--stop-only] [--hard]'
+    $usage = 'Usage : vazy lab up <fichier.json> | vazy lab status <fichier.json> | vazy lab down <fichier.json> [--yes] [--stop-only] [--hard] | vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c'
     if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage $usage) }
     Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
     $sousCommande = $Analyse.Positionnels[1].ToLower()
-    if ($sousCommande -notin 'up', 'status', 'down') { throw (New-ErreurUsage $usage) }
+    if ($sousCommande -notin 'up', 'status', 'down', 'export') { throw (New-ErreurUsage $usage) }
+    if ($sousCommande -eq 'export') { Invoke-CommandeLabExport -Analyse $Analyse; return }
     $labo = Read-FichierLabo -Chemin $Analyse.Positionnels[2]
     switch ($sousCommande) {
         'up' {
             Write-Host ("vazy : montage du labo « {0} » ({1})" -f $labo.Nom, $labo.Fichier) -ForegroundColor White
             $r = Invoke-LaboUp -Labo $labo
             Write-Host ''
+            if (Test-Simulation) {
+                Write-Host ('Simulation terminée : {0} VM auraient été créées et {1} démarrées. Rien n''a été fait.' -f $r.Creees, $r.Demarrees) -ForegroundColor Magenta
+                Write-Host ('  Pour le faire vraiment : vazy lab up {0}' -f $Analyse.Positionnels[2]) -ForegroundColor Gray
+                return
+            }
             Write-Host ('Labo « {0} » monté en {1} : {2} VM créée(s), {3} démarrée(s).' -f $r.Nom, ('{0:0.0} s' -f $r.Duree), $r.Creees, $r.Demarrees) -ForegroundColor Green
             Write-TableauLabo -Lignes @(Get-StatutLabo -Labo $labo)
             Write-Host ('  démonter : vazy lab down {0}     arrêter seulement : vazy lab down {0} --stop-only' -f $Analyse.Positionnels[2]) -ForegroundColor Gray
@@ -755,6 +876,37 @@ function Invoke-CommandeLab {
             else { Write-Host ('Labo « {0} » démonté : {1} VM supprimée(s).' -f $r.Nom, $r.Supprimees) -ForegroundColor Green }
         }
     }
+}
+
+function Invoke-CommandeLabExport {
+    param($Analyse)
+    $o = $Analyse.Options
+    $destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Analyse.Positionnels[2])
+    if ([System.IO.Path]::GetExtension($destination) -eq '') { $destination += '.json' }
+    $sources = @('labo', 'prefixe', 'vms') | Where-Object { $o.ContainsKey($_) }
+    if ($sources.Count -ne 1) {
+        throw (New-ErreurUsage 'vazy lab export attend exactement une source : --labo <nom> (VM montées par vazy lab up), --prefixe <p> (VM dont le nom commence par p-), ou --vms a,b,c.')
+    }
+    if ((Test-Path -LiteralPath $destination) -and -not $o.ContainsKey('yes')) {
+        Write-Host ('Le fichier {0} existe déjà et va être remplacé.' -f $destination) -ForegroundColor Yellow
+        if (-not (Read-Confirmation -Question 'Confirmer ?')) { Write-Host 'Annulé.' -ForegroundColor Gray; return }
+    }
+    $delai = if ($o.ContainsKey('delai')) { ConvertTo-Entier -Texte $o['delai'] -Option 'delai' -Min 0 -Max 600 } else { 5 }
+    $vms = @()
+    if ($o.ContainsKey('vms')) { $vms = @($o['vms'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    $export = Export-Labo -Labo $(if ($o.ContainsKey('labo')) { $o['labo'] } else { '' }) `
+                          -Prefixe $(if ($o.ContainsKey('prefixe')) { $o['prefixe'] } else { '' }) `
+                          -Vms $vms -Delai $delai -AvecRequis:$o.ContainsKey('requis')
+    $json = ConvertTo-Json -InputObject $export.Description -Depth 8
+    if (Test-Simulation) {
+        Write-MessageOutil -Type 'simulation' -Message ("écriture de {0} ({1} machine(s))" -f $destination, @($export.Machines).Count)
+        Write-Host $json
+        return
+    }
+    [System.IO.File]::WriteAllText($destination, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host ('Labo « {0} » exporté dans {1} : {2} machine(s) ({3}).' -f $export.Nom, $destination, @($export.Machines).Count, (@($export.Machines) -join ', ')) -ForegroundColor Green
+    Write-Host '  Relisez-le avant de le partager : les modèles y sont désignés par vos noms locaux.' -ForegroundColor Gray
+    Write-Host ('  Le rejouer : vazy lab up {0}' -f $destination) -ForegroundColor Gray
 }
 
 function Invoke-CommandeConfig {
@@ -792,6 +944,15 @@ try {
     if ($analyse.Options.ContainsKey('help'))    { $commande = 'help' }
     if ($analyse.Options.ContainsKey('version')) { $commande = 'version' }
 
+    # Journal et simulation : branchés avant toute opération. La ligne de
+    # commande complète ouvre l'entrée du journal, pour retrouver le contexte.
+    $simulation = $analyse.Options.ContainsKey('dry-run')
+    Set-ModeSimulation -Actif $simulation
+    Write-Journal ('vazy ' + (($args | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '))
+    if ($simulation) {
+        Write-Host 'Mode simulation (--dry-run) : rien ne sera modifié. Les commandes affichées sont celles qui seraient lancées.' -ForegroundColor Magenta
+    }
+
     # Nettoyage paresseux des VM éphémères, avant toute autre chose (« gc » le
     # lance lui-même, en mode détaillé). Sans VM éphémère, ne coûte rien.
     $nettoyees = @()
@@ -824,6 +985,8 @@ try {
             'unsnap'   { Invoke-CommandeUnsnap   -Analyse $analyse }
             'gc'       { Invoke-CommandeGc       -Analyse $analyse }
             'lab'      { Invoke-CommandeLab      -Analyse $analyse }
+            'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
+            'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'template' { Invoke-CommandeTemplate -Analyse $analyse }
             'config'   { Invoke-CommandeConfig   -Analyse $analyse }
             default    { Invoke-CommandeCreation -Analyse $analyse }
@@ -831,6 +994,7 @@ try {
     }
 } catch {
     $ex = $_.Exception
+    try { Write-Journal ('ERREUR : ' + $ex.Message) } catch { }
     if ($ex.Data.Contains('Conseil')) {
         Write-Erreur -Message $ex.Message -Conseil $ex.Data['Conseil']
         $codeSortie = if ($ex.Data.Contains('CodeSortie')) { [int]$ex.Data['CodeSortie'] } else { 1 }

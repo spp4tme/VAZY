@@ -59,11 +59,33 @@
 #                                                identifiants) ; renvoie son code de sortie ;
 #                                                le mot de passe n'apparaît dans aucun message
 #
+#  Protection du modèle et autonomie :
+#    Get-MachineEmpreinte      -Machine          -> disques de base (nom -> taille, date)
+#    Test-MachineEmpreinte     -Machine -Empreinte
+#                                                -> @{ Erreurs ; Attentions } (le modèle est-il intact ?)
+#    Convert-MachineEnComplete -Machine -Nom     clone lié -> machine complète, même chemin
+#    Get-MachineDisqueGo       -Machine          -> capacité déclarée des disques, en Go
+#
+#  Observation (journal et --dry-run) :
+#    Set-PiloteObservateur     -Observateur -Simulation
+#       L'observateur (scriptblock Type, Message) reçoit 'journal' pour chaque
+#       commande exécutée et 'simulation' pour chaque commande NON exécutée en
+#       mode simulation. Toute commande vmrun est construite en un seul point
+#       (Invoke-Vmrun), toute écriture de .vmx passe par Write-FichierVmx.
+#
 #  Toute erreur est levée sous forme d'exception dont Data['Conseil'] indique
 #  quoi faire pour corriger (voir New-ErreurPilote).
 # ============================================================================
 
-$script:VmrunExe = $null   # chemin de vmrun.exe, renseigné par Initialize-Pilote
+$script:VmrunExe    = $null                          # chemin de vmrun.exe, renseigné par Initialize-Pilote
+$script:Simulation  = $false                         # --dry-run : rien n'est modifié, les commandes sont affichées
+$script:Observateur = { param($Type, $Message) }     # journal et simulations, fourni par la logique
+
+function Set-PiloteObservateur {
+    param([scriptblock]$Observateur, [bool]$Simulation = $false)
+    if ($Observateur) { $script:Observateur = $Observateur }
+    $script:Simulation = $Simulation
+}
 
 # ----------------------------------------------------------------------------
 #  Outils internes : erreurs, localisation et exécution de vmrun
@@ -132,11 +154,24 @@ function ConvertTo-LigneCommande {
 function Invoke-Vmrun {
     param([string[]]$Arguments, [System.Management.Automation.PSCredential]$Identifiants = $null)
     $prefixe = @('-T', 'ws')
+    $prefixeAffichable = @('-T', 'ws')
     $secret = $null
     if ($null -ne $Identifiants) {
         $secret = $Identifiants.GetNetworkCredential().Password
         $prefixe += @('-gu', $Identifiants.UserName, '-gp', $secret)
+        $prefixeAffichable += @('-gu', $Identifiants.UserName, '-gp', '***')
     }
+    # Ligne exacte, mot de passe masqué : c'est elle qui va au journal et à l'écran.
+    $affichable = 'vmrun ' + (ConvertTo-LigneCommande ($prefixeAffichable + $Arguments))
+    # En simulation (--dry-run), les commandes qui modifient quelque chose sont
+    # affichées au lieu d'être exécutées ; les lectures s'exécutent toujours.
+    $modifie = $Arguments[0] -in @('clone', 'start', 'stop', 'deleteVM', 'snapshot', 'revertToSnapshot', 'deleteSnapshot',
+                                    'runProgramInGuest', 'runScriptInGuest', 'writeVariable', 'suspend', 'reset', 'pause', 'unpause')
+    if ($script:Simulation -and $modifie) {
+        & $script:Observateur 'simulation' $affichable
+        return [pscustomobject]@{ Code = 0; Lignes = @(); Texte = ''; Simule = $true }
+    }
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     $infos = New-Object System.Diagnostics.ProcessStartInfo
     $infos.FileName = $script:VmrunExe
     $infos.Arguments = ConvertTo-LigneCommande ($prefixe + $Arguments)
@@ -157,7 +192,8 @@ function Invoke-Vmrun {
     $texte = (($sortie + "`n" + $lectureErreurs.Result) -replace "`r", '').Trim()
     if ($secret) { $texte = $texte.Replace($secret, '***') }   # jamais de mot de passe dans un message
     $lignes = @($texte -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    return [pscustomobject]@{ Code = $processus.ExitCode; Lignes = $lignes; Texte = $texte }
+    & $script:Observateur 'journal' ('{0}  -> code {1} en {2:0.0} s' -f $affichable, $processus.ExitCode, $chrono.Elapsed.TotalSeconds)
+    return [pscustomobject]@{ Code = $processus.ExitCode; Lignes = $lignes; Texte = $texte; Simule = $false }
 }
 
 # Extrait le message d'erreur de vmrun ("Error: ...") d'un résultat.
@@ -180,6 +216,11 @@ function Get-MessageVmrun {
 function Read-FichierVmx {
     param([string]$Chemin)
     if (-not (Test-Path -LiteralPath $Chemin -PathType Leaf)) {
+        if ($script:Simulation) {
+            # Machine « créée » par une commande simulée : configuration vide, jamais écrite.
+            return [pscustomobject]@{ Chemin = $Chemin; Encodage = (New-Object System.Text.UTF8Encoding($false)); FinDeLigne = "`r`n"
+                                      Lignes = (New-Object 'System.Collections.Generic.List[string]'); Changements = (New-Object 'System.Collections.Generic.List[string]'); Simule = $true }
+        }
         throw (New-ErreurPilote "Fichier de configuration introuvable : $Chemin" `
             "La VM a peut-être été supprimée ou déplacée en dehors de vazy. Retirez-la du catalogue avec : vazy rm <nom>")
     }
@@ -197,11 +238,19 @@ function Read-FichierVmx {
     $lignes = New-Object 'System.Collections.Generic.List[string]'
     foreach ($l in ($texte -split '\r?\n')) { $lignes.Add($l) }
     while ($lignes.Count -gt 0 -and $lignes[$lignes.Count - 1] -eq '') { $lignes.RemoveAt($lignes.Count - 1) }
-    return [pscustomobject]@{ Chemin = $Chemin; Encodage = $encodage; FinDeLigne = $finDeLigne; Lignes = $lignes }
+    return [pscustomobject]@{ Chemin = $Chemin; Encodage = $encodage; FinDeLigne = $finDeLigne; Lignes = $lignes
+                              Changements = (New-Object 'System.Collections.Generic.List[string]'); Simule = $false }
 }
 
+# Seul point d'écriture d'un .vmx : journalisé, et simplement affiché en simulation.
 function Write-FichierVmx {
     param($Vmx)
+    $detail = if ($Vmx.Changements.Count -gt 0) { $Vmx.Changements -join ' ; ' } else { 'aucun changement' }
+    if ($script:Simulation) {
+        & $script:Observateur 'simulation' ('écriture de {0} : {1}' -f $Vmx.Chemin, $detail)
+        $Vmx.Changements.Clear()
+        return
+    }
     $texte = ($Vmx.Lignes -join $Vmx.FinDeLigne) + $Vmx.FinDeLigne
     try {
         [System.IO.File]::WriteAllText($Vmx.Chemin, $texte, $Vmx.Encodage)
@@ -209,6 +258,8 @@ function Write-FichierVmx {
         throw (New-ErreurPilote "Impossible d'écrire $($Vmx.Chemin) : $($_.Exception.Message)" `
             "Vérifiez que la VM est éteinte et que le fichier n'est pas en lecture seule.")
     }
+    & $script:Observateur 'journal' ('écriture de {0} : {1}' -f $Vmx.Chemin, $detail)
+    $Vmx.Changements.Clear()
 }
 
 # Indice de la ligne qui définit une clé (insensible à la casse), ou -1.
@@ -236,7 +287,8 @@ function Set-ValeurVmx {
     $v = $Valeur -replace '\|', '|7C' -replace '"', '|22'   # échappement VMware des caractères spéciaux
     $ligne = $Cle + ' = "' + $v + '"'
     $i = Get-IndexCleVmx -Vmx $Vmx -Cle $Cle
-    if ($i -ge 0) { $Vmx.Lignes[$i] = $ligne } else { $Vmx.Lignes.Add($ligne) }
+    if ($i -ge 0) { if ($Vmx.Lignes[$i] -ceq $ligne) { return }; $Vmx.Lignes[$i] = $ligne } else { $Vmx.Lignes.Add($ligne) }
+    $Vmx.Changements.Add($ligne)
 }
 
 # Supprime toutes les lignes dont la clé correspond à l'expression régulière.
@@ -244,7 +296,10 @@ function Remove-ClesVmx {
     param($Vmx, [string]$MotifCle)
     $motif = '^\s*(' + $MotifCle + ')\s*='
     for ($i = $Vmx.Lignes.Count - 1; $i -ge 0; $i--) {
-        if ($Vmx.Lignes[$i] -match $motif) { $Vmx.Lignes.RemoveAt($i) }
+        if ($Vmx.Lignes[$i] -match $motif) {
+            $Vmx.Changements.Add('retrait de ' + ($Vmx.Lignes[$i] -replace '\s*=.*$', ''))
+            $Vmx.Lignes.RemoveAt($i)
+        }
     }
 }
 
@@ -270,6 +325,7 @@ function Protect-MachineModele {
     param([Parameter(Mandatory = $true)][string]$Machine)
     $marque = Get-CheminMarqueModele $Machine
     if (Test-Path -LiteralPath $marque -PathType Leaf) { return }
+    if ($script:Simulation) { & $script:Observateur 'simulation' "création de la marque de modèle $marque"; return }
     $texte = @(
         "Machine marquée comme MODÈLE par vazy le $((Get-Date).ToString('yyyy-MM-dd HH:mm')).",
         "Ne jamais la démarrer, ne jamais supprimer son instantané : des clones liés en dépendent.",
@@ -285,7 +341,10 @@ function Protect-MachineModele {
 function Unprotect-MachineModele {
     param([Parameter(Mandatory = $true)][string]$Machine)
     $marque = Get-CheminMarqueModele $Machine
-    if (Test-Path -LiteralPath $marque -PathType Leaf) { Remove-Item -LiteralPath $marque -Force }
+    if (-not (Test-Path -LiteralPath $marque -PathType Leaf)) { return }
+    if ($script:Simulation) { & $script:Observateur 'simulation' "suppression de la marque de modèle $marque"; return }
+    Remove-Item -LiteralPath $marque -Force
+    & $script:Observateur 'journal' "suppression de la marque de modèle $marque"
 }
 
 # Garde-fou appelé par chaque opération dangereuse pour les clones liés.
@@ -359,10 +418,12 @@ function New-MachineDepuisModele {
     if (Test-Path -LiteralPath $destination) {
         throw (New-ErreurPilote "Le fichier $destination existe déjà." "Choisissez un autre nom avec --name, ou supprimez ce dossier s'il s'agit d'un reste d'une VM effacée.")
     }
-    try {
-        if (-not (Test-Path -LiteralPath $Dossier)) { New-Item -ItemType Directory -Path $Dossier -Force | Out-Null }
-    } catch {
-        throw (New-ErreurPilote "Impossible de créer le dossier $Dossier : $($_.Exception.Message)" "Vérifiez le chemin et vos droits d'écriture, ou changez le dossier des VM : vazy config dossierVms <chemin>")
+    if (-not $script:Simulation) {
+        try {
+            if (-not (Test-Path -LiteralPath $Dossier)) { New-Item -ItemType Directory -Path $Dossier -Force | Out-Null }
+        } catch {
+            throw (New-ErreurPilote "Impossible de créer le dossier $Dossier : $($_.Exception.Message)" "Vérifiez le chemin et vos droits d'écriture, ou changez le dossier des VM : vazy config dossierVms <chemin>")
+        }
     }
 
     $r = Invoke-Vmrun @('clone', $Modele, $destination, 'linked', "-snapshot=$Instantane", "-cloneName=$Nom")
@@ -370,7 +431,7 @@ function New-MachineDepuisModele {
         throw (New-ErreurPilote "Le clonage a échoué : $(Get-MessageVmrun $r)" `
             "Vérifiez que le modèle est éteint et que son instantané « $Instantane » existe toujours (vazy template list). Le dossier $Dossier peut contenir des restes à supprimer.")
     }
-    if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+    if (-not $script:Simulation -and -not (Test-Path -LiteralPath $destination -PathType Leaf)) {
         throw (New-ErreurPilote "vmrun n'a signalé aucune erreur mais $destination n'existe pas." "Regardez le dossier $Dossier et le journal de VMware Workstation.")
     }
 
@@ -482,6 +543,7 @@ function Remove-Machine {
         throw (New-ErreurPilote "La suppression a échoué : $(Get-MessageVmrun $r)" `
             "Vérifiez que la VM est éteinte et fermée dans VMware Workstation, puis réessayez. En dernier recours, supprimez le dossier $dossier à la main.")
     }
+    if ($script:Simulation) { & $script:Observateur 'simulation' "nettoyage du dossier $dossier"; return $null }
     if (-not (Test-Path -LiteralPath $dossier)) { return $null }
 
     # deleteVM laisse parfois des résidus : journaux, dossiers de verrou, et
@@ -586,6 +648,7 @@ function Get-MachineSystemeInvite {
 # recevoir des commandes. Interroge toutes les 3 s jusqu'au délai maximal.
 function Wait-MachineOutils {
     param([Parameter(Mandatory = $true)][string]$Machine, [int]$DelaiMaxSec = 120)
+    if ($script:Simulation) { & $script:Observateur 'simulation' "attente des outils invité de $Machine (au plus $DelaiMaxSec s)"; return $true }
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     while ($true) {
         $r = Invoke-Vmrun @('checkToolsState', $Machine)
@@ -650,6 +713,115 @@ function Invoke-MachineScript {
         "Ouvrez la VM dans VMware Workstation pour voir ce qui se passe dans l'invité."
     }
     throw (New-ErreurPilote "Exécution dans l'invité impossible après $Tentatives tentatives : $message" $conseil)
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat du pilote : protection du modèle et autonomie
+# ----------------------------------------------------------------------------
+
+# Disques de base d'une machine : les .vmdk de son dossier qui ne sont pas des
+# disques de différences (-000001.vmdk et leurs morceaux). Une fois
+# l'instantané d'un modèle pris, ils ne doivent plus jamais changer : les
+# clones liés y lisent. Renvoie, par nom de fichier, taille et date.
+function Get-MachineEmpreinte {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $dossier = Split-Path -Parent $Machine
+    $disques = [ordered]@{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $dossier -Filter '*.vmdk' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if ($f.Name -match '-\d{6}(-s\d{3}|-f\d{3})?\.vmdk$') { continue }
+        $disques[$f.Name] = [ordered]@{ taille = [long]$f.Length; modifie = $f.LastWriteTimeUtc.ToString('o') }
+    }
+    return $disques
+}
+
+# Compare l'état actuel des disques de base d'un modèle à l'empreinte prise à
+# la création d'un clone. Fichier manquant ou taille changée : erreur (le
+# clone lié est cassé, un instantané du modèle a probablement été supprimé
+# ou consolidé). Date seule changée : attention.
+function Test-MachineEmpreinte {
+    param([Parameter(Mandatory = $true)][string]$Machine, [Parameter(Mandatory = $true)]$Empreinte)
+    $erreurs = @(); $attentions = @()
+    $dossier = Split-Path -Parent $Machine
+    foreach ($nom in @($Empreinte.Keys)) {
+        $attendu = $Empreinte[$nom]
+        $chemin = Join-Path $dossier $nom
+        if (-not (Test-Path -LiteralPath $chemin -PathType Leaf)) { $erreurs += "disque de base manquant : $chemin"; continue }
+        $f = Get-Item -LiteralPath $chemin
+        if ([long]$f.Length -ne [long]$attendu['taille']) {
+            $erreurs += ("disque de base modifié : {0} ({1} octets à la création du clone, {2} maintenant)" -f $nom, $attendu['taille'], $f.Length)
+        } elseif ($f.LastWriteTimeUtc.ToString('o') -ne [string]$attendu['modifie']) {
+            $attentions += "disque de base retouché sans changement de taille : $nom"
+        }
+    }
+    return @{ Erreurs = $erreurs; Attentions = $attentions }
+}
+
+# Convertit un clone lié en machine complète : clone complet dans un dossier
+# voisin (<nom>.freeze), suppression de l'ancienne machine, puis le nouveau
+# dossier prend la place de l'ancien, le chemin de la machine ne change pas.
+# Machine éteinte obligatoire. Les instantanés ne survivent pas à un clone
+# complet : l'appelant reprend son point de retour.
+function Convert-MachineEnComplete {
+    param([Parameter(Mandatory = $true)][string]$Machine, [Parameter(Mandatory = $true)][string]$Nom)
+    Assert-MachinePasModele -Machine $Machine -Operation 'convertir'
+    $dossier = Split-Path -Parent $Machine
+    $temporaire = Join-Path (Split-Path -Parent $dossier) ($Nom + '.freeze')
+    $destination = Join-Path $temporaire ($Nom + '.vmx')
+    if (Test-Path -LiteralPath $temporaire) {
+        throw (New-ErreurPilote "Le dossier $temporaire existe déjà (reste d'une conversion interrompue)." "Vérifiez son contenu, supprimez-le à la main, puis réessayez.")
+    }
+    $r = Invoke-Vmrun @('clone', $Machine, $destination, 'full', "-cloneName=$Nom")
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "Le clone complet a échoué : $(Get-MessageVmrun $r)" "Vérifiez la place disponible et que la VM est éteinte ; le dossier $temporaire peut contenir des restes à supprimer.")
+    }
+    if ($script:Simulation) { & $script:Observateur 'simulation' "suppression de $dossier puis renommage de $temporaire en $dossier"; return $Machine }
+    if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+        throw (New-ErreurPilote "vmrun n'a signalé aucune erreur mais $destination n'existe pas." "Regardez le dossier $temporaire et le journal de VMware Workstation ; l'ancienne VM est intacte.")
+    }
+    Remove-Machine -Machine $Machine | Out-Null
+    if (Test-Path -LiteralPath $dossier) {
+        throw (New-ErreurPilote "L'ancien dossier $dossier n'a pas pu être vidé ; la machine complète est prête dans $temporaire." "Supprimez $dossier à la main, puis renommez $temporaire en $dossier.")
+    }
+    Rename-Item -LiteralPath $temporaire -NewName (Split-Path -Leaf $dossier)
+    & $script:Observateur 'journal' "renommage de $temporaire en $dossier"
+    $vmx = Read-FichierVmx -Chemin $Machine
+    Set-ValeurVmx -Vmx $vmx -Cle 'msg.autoAnswer' -Valeur 'TRUE'
+    Write-FichierVmx -Vmx $vmx
+    return $Machine
+}
+
+# Capacité totale déclarée des disques d'une machine, en Go (0 si illisible),
+# lue dans le descripteur des .vmdk référencés par sa configuration.
+function Get-MachineDisqueGo {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $vmx = Read-FichierVmx -Chemin $Machine
+    $dossier = Split-Path -Parent $Machine
+    $total = [long]0
+    foreach ($ligne in $vmx.Lignes) {
+        if ($ligne -match '^\s*(scsi|sata|ide|nvme)\d+:\d+\.fileName\s*=\s*"([^"]+\.vmdk)"') {
+            $chemin = $Matches[2]
+            if (-not [System.IO.Path]::IsPathRooted($chemin)) { $chemin = Join-Path $dossier $chemin }
+            $total += Get-CapaciteVmdk -Chemin $chemin
+        }
+    }
+    return [math]::Round($total / 1GB, 1)
+}
+
+# Le descripteur d'un .vmdk (en tête du fichier, ou fichier séparé pour un
+# disque découpé) contient des lignes « RW <secteurs> SPARSE ... ».
+function Get-CapaciteVmdk {
+    param([string]$Chemin)
+    if (-not (Test-Path -LiteralPath $Chemin -PathType Leaf)) { return [long]0 }
+    try {
+        $flux = [System.IO.File]::OpenRead($Chemin)
+        $tampon = New-Object byte[] 65536
+        $lu = $flux.Read($tampon, 0, $tampon.Length)
+        $flux.Close()
+        $texte = [System.Text.Encoding]::ASCII.GetString($tampon, 0, $lu)
+        $secteurs = [long]0
+        foreach ($m in [regex]::Matches($texte, '(?m)^\s*RW\s+(\d+)\s+(SPARSE|FLAT|VMFS|VMFSSPARSE|ZERO)')) { $secteurs += [long]$m.Groups[1].Value }
+        return $secteurs * 512
+    } catch { return [long]0 }
 }
 
 # Supprimer un instantané. VMware fusionne ses disques avec la suite de la
