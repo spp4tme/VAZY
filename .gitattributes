@@ -1,0 +1,7 @@
+# Fins de ligne : normalisées en LF dans le dépôt, CRLF à l'extraction pour
+# les scripts Windows (vazy.cmd doit rester en CRLF ; les .ps1 gardent leur BOM).
+* text=auto
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.md text
+*.json text

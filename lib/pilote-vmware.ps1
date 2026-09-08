@@ -21,7 +21,8 @@
 #    Start-Machine            -Machine [-SansInterface]
 #    Stop-Machine             -Machine [-Brutal]
 #    Remove-Machine           -Machine
-#                              -> message d'information éventuel (ou $null)
+#                              -> $null, ou @{ Type = 'info'|'attention'; Message }
+#                                 si des restes ont été nettoyés ou subsistent
 #
 #  Trois fonctions de lecture seule dont la logique a besoin :
 #    Initialize-Pilote        [-CheminForce]
@@ -31,6 +32,29 @@
 #    Get-MachineEnCours        -> chemins des machines en cours d'exécution
 #    Get-MachineInstantanes   -Machine
 #                              -> noms des instantanés de la machine
+#
+#  Instantanés (phase 1, remise à zéro) :
+#    New-MachineInstantane     -Machine -Nom     prendre un instantané
+#    Restore-MachineInstantane -Machine -Nom     revenir à un instantané (machine arrêtée)
+#    Remove-MachineInstantane  -Machine -Nom     supprimer un instantané
+#    (lister : Get-MachineInstantanes ci-dessus)
+#
+#  Marque « modèle » : posée par la logique sur chaque modèle enregistré, elle
+#  fait refuser au pilote lui-même tout démarrage, suppression ou opération
+#  d'instantané sur cette machine, quoi que dise le catalogue :
+#    Protect-MachineModele     -Machine          poser la marque
+#    Unprotect-MachineModele   -Machine          retirer la marque
+#    Test-MachineModele        -Machine          -> $true si marquée
+#
+#  Invité (phase 4, personnalisation) :
+#    Get-MachineSystemeInvite  -Machine          -> 'windows' | 'linux' | 'inconnu'
+#    Wait-MachineOutils        -Machine [-DelaiMaxSec]
+#                                                -> $true dès que les outils invité répondent,
+#                                                   $false passé le délai
+#    Invoke-MachineScript      -Machine -Identifiants -Systeme -Script
+#                                                exécute un script dans l'invité
+#                                                (Identifiants = PSCredential ; le mot de
+#                                                passe n'apparaît dans aucun message)
 #
 #  Toute erreur est levée sous forme d'exception dont Data['Conseil'] indique
 #  quoi faire pour corriger (voir New-ErreurPilote).
@@ -97,11 +121,22 @@ function ConvertTo-LigneCommande {
 # Exécute vmrun (toujours avec -T ws) et renvoie Code, Lignes et Texte.
 # Ne lève pas d'exception sur un code retour non nul : chaque opération
 # interprète le résultat pour produire un message utile.
+# -Identifiants (PSCredential) : identifiants de l'invité pour les commandes
+# qui agissent dans la VM. vmrun ne les accepte que sur sa ligne de commande
+# (-gu / -gp) : le mot de passe y est donc visible, pour les processus de ce
+# compte Windows, pendant les quelques secondes de l'appel. C'est une limite
+# de vmrun. vazy ne l'écrit jamais et le masque dans toute sortie.
 function Invoke-Vmrun {
-    param([string[]]$Arguments)
+    param([string[]]$Arguments, [System.Management.Automation.PSCredential]$Identifiants = $null)
+    $prefixe = @('-T', 'ws')
+    $secret = $null
+    if ($null -ne $Identifiants) {
+        $secret = $Identifiants.GetNetworkCredential().Password
+        $prefixe += @('-gu', $Identifiants.UserName, '-gp', $secret)
+    }
     $infos = New-Object System.Diagnostics.ProcessStartInfo
     $infos.FileName = $script:VmrunExe
-    $infos.Arguments = ConvertTo-LigneCommande (@('-T', 'ws') + $Arguments)
+    $infos.Arguments = ConvertTo-LigneCommande ($prefixe + $Arguments)
     $infos.UseShellExecute = $false
     $infos.RedirectStandardOutput = $true
     $infos.RedirectStandardError = $true
@@ -117,6 +152,7 @@ function Invoke-Vmrun {
     $sortie = $processus.StandardOutput.ReadToEnd()
     $processus.WaitForExit()
     $texte = (($sortie + "`n" + $lectureErreurs.Result) -replace "`r", '').Trim()
+    if ($secret) { $texte = $texte.Replace($secret, '***') }   # jamais de mot de passe dans un message
     $lignes = @($texte -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     return [pscustomobject]@{ Code = $processus.ExitCode; Lignes = $lignes; Texte = $texte }
 }
@@ -206,6 +242,55 @@ function Remove-ClesVmx {
     $motif = '^\s*(' + $MotifCle + ')\s*='
     for ($i = $Vmx.Lignes.Count - 1; $i -ge 0; $i--) {
         if ($Vmx.Lignes[$i] -match $motif) { $Vmx.Lignes.RemoveAt($i) }
+    }
+}
+
+# ----------------------------------------------------------------------------
+#  Marque « modèle » : fichier témoin posé à côté du descripteur de la machine
+#  (<machine>.vazy-modele). vmrun clone ne le copie pas, les clones ne
+#  l'héritent donc jamais. Toute opération dangereuse pour les clones liés
+#  (démarrer, supprimer, instantanés) est refusée par le pilote lui-même sur
+#  une machine marquée, indépendamment du catalogue.
+# ----------------------------------------------------------------------------
+
+function Get-CheminMarqueModele {
+    param([string]$Machine)
+    return ($Machine + '.vazy-modele')
+}
+
+function Test-MachineModele {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    return (Test-Path -LiteralPath (Get-CheminMarqueModele $Machine) -PathType Leaf)
+}
+
+function Protect-MachineModele {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $marque = Get-CheminMarqueModele $Machine
+    if (Test-Path -LiteralPath $marque -PathType Leaf) { return }
+    $texte = @(
+        "Machine marquée comme MODÈLE par vazy le $((Get-Date).ToString('yyyy-MM-dd HH:mm')).",
+        "Ne jamais la démarrer, ne jamais supprimer son instantané : des clones liés en dépendent.",
+        "vazy refuse toute opération dessus tant que ce fichier existe (vazy template rm <alias> le retire)."
+    ) -join "`r`n"
+    try {
+        [System.IO.File]::WriteAllText($marque, $texte + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        throw (New-ErreurPilote "Impossible de poser la marque de modèle $marque : $($_.Exception.Message)" "Vérifiez vos droits d'écriture dans le dossier du modèle.")
+    }
+}
+
+function Unprotect-MachineModele {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $marque = Get-CheminMarqueModele $Machine
+    if (Test-Path -LiteralPath $marque -PathType Leaf) { Remove-Item -LiteralPath $marque -Force }
+}
+
+# Garde-fou appelé par chaque opération dangereuse pour les clones liés.
+function Assert-MachinePasModele {
+    param([string]$Machine, [string]$Operation)
+    if (Test-MachineModele -Machine $Machine) {
+        throw (New-ErreurPilote "Refus de $Operation : $Machine est marquée comme modèle." `
+            "Un modèle sert uniquement de base aux clones liés ; le démarrer ou toucher à ses instantanés casserait tous ses clones. Si c'est vraiment voulu, retirez-le d'abord du catalogue : vazy template rm <alias> (la marque $(Get-CheminMarqueModele $Machine) disparaît avec lui).")
     }
 }
 
@@ -353,6 +438,7 @@ function Start-Machine {
         [Parameter(Mandatory = $true)][string]$Machine,
         [switch]$SansInterface
     )
+    Assert-MachinePasModele -Machine $Machine -Operation 'démarrer'
     $mode = if ($SansInterface) { 'nogui' } else { 'gui' }
     $r = Invoke-Vmrun @('start', $Machine, $mode)
     if ($r.Code -ne 0) {
@@ -379,26 +465,172 @@ function Stop-Machine {
     }
 }
 
-# 6. Supprimer la machine et ses fichiers. Renvoie un message d'information
-#    si des fichiers subsistent, $null sinon.
+# 6. Supprimer la machine et ses fichiers. Renvoie $null, ou un message
+#    @{ Type = 'info'|'attention'; Message } : « info » si vmrun a laissé des
+#    restes (journaux, verrous, fichiers d'instantanés) que le pilote a
+#    nettoyés, « attention » si des fichiers inconnus subsistent.
 function Remove-Machine {
     param([Parameter(Mandatory = $true)][string]$Machine)
+    Assert-MachinePasModele -Machine $Machine -Operation 'supprimer'
     $dossier = Split-Path -Parent $Machine
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($Machine)
     $r = Invoke-Vmrun @('deleteVM', $Machine)
     if ($r.Code -ne 0) {
         throw (New-ErreurPilote "La suppression a échoué : $(Get-MessageVmrun $r)" `
             "Vérifiez que la VM est éteinte et fermée dans VMware Workstation, puis réessayez. En dernier recours, supprimez le dossier $dossier à la main.")
     }
-    # vmrun laisse parfois des résidus (journaux, dossier de verrou) : on nettoie
-    # le dossier s'il ne contient plus aucun disque ni descripteur.
-    if (Test-Path -LiteralPath $dossier) {
-        $restes = @(Get-ChildItem -LiteralPath $dossier -Recurse -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Extension -in '.vmdk', '.vmx', '.vmsn', '.vmem' })
-        if ($restes.Count -eq 0) {
-            Remove-Item -LiteralPath $dossier -Recurse -Force -ErrorAction SilentlyContinue
-            return $null
+    if (-not (Test-Path -LiteralPath $dossier)) { return $null }
+
+    # deleteVM laisse parfois des résidus : journaux, dossiers de verrou, et
+    # selon les versions les fichiers d'instantanés du clone (<nom>-000001.vmdk,
+    # <nom>.vmsd, <nom>-Snapshot1.vmsn). Tout ce qui porte le nom de la machine
+    # ou est un fichier de service VMware lui appartient : on le retire. Le
+    # disque du modèle n'est jamais ici (il est dans le dossier du modèle).
+    $motifs = @(($base + '.*'), ($base + '-*'), 'vmware*.log', '*.lck', '*.vmxf', '*.scoreboard', 'nvram', 'caches')
+    $nettoyes = @()
+    foreach ($e in @(Get-ChildItem -LiteralPath $dossier -Force -ErrorAction SilentlyContinue)) {
+        foreach ($m in $motifs) {
+            if ($e.Name -like $m) {
+                Remove-Item -LiteralPath $e.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                $nettoyes += $e.Name
+                break
+            }
         }
-        return "Des fichiers subsistent dans $dossier ; vérifiez-les et supprimez-les à la main si besoin."
+    }
+    $restants = @(Get-ChildItem -LiteralPath $dossier -Force -ErrorAction SilentlyContinue)
+    if ($restants.Count -gt 0) {
+        return @{ Type = 'attention'; Message = ("Fichiers inconnus conservés dans $dossier : " + (($restants | ForEach-Object { $_.Name }) -join ', ') + ". Vérifiez-les puis supprimez le dossier à la main.") }
+    }
+    Remove-Item -LiteralPath $dossier -Force -ErrorAction SilentlyContinue
+    if ($nettoyes.Count -gt 0) {
+        return @{ Type = 'info'; Message = ('Restes laissés par deleteVM, nettoyés par vazy : ' + ($nettoyes -join ', ')) }
     }
     return $null
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat du pilote : instantanés (phase 1)
+#  Refusés sur une machine marquée modèle : l'instantané d'ancrage d'un modèle
+#  (celui sur lequel reposent les clones liés) ne doit jamais être touché.
+# ----------------------------------------------------------------------------
+
+# Prendre un instantané. Machine éteinte : instantané propre et rapide.
+# Machine en marche : VMware y inclut la mémoire (plus long, plus gros).
+function New-MachineInstantane {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'prendre un instantané de'
+    $r = Invoke-Vmrun @('snapshot', $Machine, $Nom)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La prise de l'instantané « $Nom » a échoué : $(Get-MessageVmrun $r)" `
+            "Ouvrez VMware Workstation (VM > Snapshot > Snapshot Manager) pour vérifier qu'aucune opération n'est en cours sur cette VM, puis réessayez.")
+    }
+}
+
+# Revenir à un instantané. vmrun exige une machine arrêtée : l'appelant
+# l'arrête avant. Après le retour, la machine est dans l'état enregistré
+# (éteinte si l'instantané a été pris machine éteinte).
+function Restore-MachineInstantane {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'revenir à un instantané de'
+    $r = Invoke-Vmrun @('revertToSnapshot', $Machine, $Nom)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "Le retour à l'instantané « $Nom » a échoué : $(Get-MessageVmrun $r)" `
+            "Vérifiez que la VM est bien éteinte (VMware met parfois quelques secondes à la libérer après un arrêt : réessayez) et que l'instantané existe : vazy snaps <nom>")
+    }
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat du pilote : invité (phase 4)
+# ----------------------------------------------------------------------------
+
+# Famille du système invité, d'après la clé guestOS du .vmx.
+function Get-MachineSystemeInvite {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $vmx = Read-FichierVmx -Chemin $Machine
+    $guestOs = [string](Get-ValeurVmx -Vmx $vmx -Cle 'guestOS')
+    if ($guestOs -match '^win') { return 'windows' }
+    if ($guestOs -match 'linux|ubuntu|debian|centos|rhel|redhat|fedora|suse|sles|oracle|arch|photon|alma|rocky') { return 'linux' }
+    return 'inconnu'
+}
+
+# Attend que les outils invité (VMware Tools / open-vm-tools) répondent :
+# vmrun checkToolsState renvoie « running » quand l'invité est prêt à
+# recevoir des commandes. Interroge toutes les 3 s jusqu'au délai maximal.
+function Wait-MachineOutils {
+    param([Parameter(Mandatory = $true)][string]$Machine, [int]$DelaiMaxSec = 120)
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $r = Invoke-Vmrun @('checkToolsState', $Machine)
+        if ($r.Code -eq 0 -and (($r.Lignes -join ' ') -match '\brunning\b')) { return $true }
+        if ($chrono.Elapsed.TotalSeconds -ge $DelaiMaxSec) { return $false }
+        Start-Sleep -Seconds 3
+    }
+}
+
+# Exécute un script dans l'invité, avec les identifiants d'un compte de
+# l'invité. Le script vient de la logique (il dépend du système invité, pas
+# de l'hyperviseur) ; ici on ne sait que le faire exécuter :
+#   linux   : runScriptInGuest avec /bin/sh (VMware copie le texte dans un
+#             fichier temporaire de l'invité et l'exécute)
+#   windows : runProgramInGuest powershell.exe -EncodedCommand (le script est
+#             transmis en base64 : aucun problème de guillemets)
+# Le programme tourne avec les droits du compte fourni : sous Windows, un
+# compte administrateur soumis à l'UAC n'est PAS élevé.
+function Invoke-MachineScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Identifiants,
+        [Parameter(Mandatory = $true)][string]$Systeme,
+        [Parameter(Mandatory = $true)][string]$Script
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation "exécuter un script dans"
+    switch ($Systeme) {
+        'linux' {
+            $commande = @('runScriptInGuest', $Machine, '/bin/sh', $Script)
+        }
+        'windows' {
+            $encode = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
+            $commande = @('runProgramInGuest', $Machine, 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+                          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encode)
+        }
+        default {
+            throw (New-ErreurPilote "Système invité inconnu : « $Systeme »." "Indiquez-le au modèle : vazy template creds <modele> --os linux|windows")
+        }
+    }
+    $r = Invoke-Vmrun -Arguments $commande -Identifiants $Identifiants
+    if ($r.Code -ne 0) {
+        $message = Get-MessageVmrun $r
+        $conseil = if ($message -match 'user name or password|Invalid user|authentication') {
+            "L'invité a refusé le compte « $($Identifiants.UserName) » : vérifiez l'utilisateur et le mot de passe (vazy template creds <modele>), et que ce compte peut ouvrir une session dans la VM."
+        } elseif ($message -match 'Tools') {
+            "Les outils VMware ne répondent pas dans l'invité : installez open-vm-tools (Linux) ou VMware Tools (Windows) dans le modèle."
+        } elseif ($message -match 'exit code') {
+            "Le script a échoué dans l'invité : droits insuffisants ? Sous Linux, le compte doit pouvoir faire sudo sans mot de passe (ou être root) ; sous Windows, il doit être administrateur sans invite UAC (compte Administrateur intégré)."
+        } else {
+            "Ouvrez la VM dans VMware Workstation pour voir ce qui se passe dans l'invité."
+        }
+        throw (New-ErreurPilote "Exécution dans l'invité impossible : $message" $conseil)
+    }
+    return $r.Texte
+}
+
+# Supprimer un instantané. VMware fusionne ses disques avec la suite de la
+# chaîne : l'opération peut prendre du temps sur une VM très modifiée.
+function Remove-MachineInstantane {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'supprimer un instantané de'
+    $r = Invoke-Vmrun @('deleteSnapshot', $Machine, $Nom)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La suppression de l'instantané « $Nom » a échoué : $(Get-MessageVmrun $r)" `
+            "Vérifiez qu'il existe (vazy snaps <nom>) et qu'aucune opération n'est en cours dans VMware Workstation.")
+    }
 }

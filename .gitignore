@@ -1,0 +1,19 @@
+# Fichiers de machines virtuelles : jamais dans le dépôt
+*.vmx
+*.vmdk
+*.vmem
+*.vmsd
+*.vmsn
+*.vmss
+*.nvram
+*.lck/
+*.vazy-modele
+
+# Données locales de vazy (si un jour copiées ici par erreur)
+creds/
+config.json
+catalogue.json
+
+# Divers Windows
+Thumbs.db
+desktop.ini
