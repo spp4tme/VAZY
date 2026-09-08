@@ -95,9 +95,12 @@ USAGE
                                      enregistre une VM éteinte, avec instantané, comme modèle
   vazy template list                 modèles enregistrés
   vazy template rm <alias>           retire un modèle du catalogue (aucun fichier supprimé)
+  vazy template mark <alias> --guestinfo | --classique
+                                     modèle guestinfo : le script vazy-guestinfo est installé dedans,
+                                     vazy dépose la configuration avant chaque démarrage, sans identifiant
   vazy template creds <alias> [--user <nom>] [--os linux|windows] [--rm]
-                                     identifiants d'un compte de l'invité (mot de passe saisi masqué,
-                                     stocké chiffré pour votre compte Windows), pour --hostname
+                                     repli pour un modèle qu'on ne peut pas modifier : identifiants d'un
+                                     compte de l'invité (inutile avec un modèle guestinfo)
   vazy gc [--yes]                    supprime les VM éphémères éteintes (fait aussi automatiquement
                                      au début de chaque commande)
   vazy lab up <fichier.json>         monte un labo entier décrit par un fichier (relançable :
@@ -122,8 +125,8 @@ OPTIONS DE CRÉATION (toutes facultatives)
   --nostart          crée sans démarrer
   --tmp              VM éphémère : supprimée automatiquement dès qu'elle est trouvée éteinte
                      (incompatible avec --nostart)
-  --hostname <nom>   nom d'hôte à appliquer dans l'invité après le démarrage (nécessite les
-                     identifiants du modèle : vazy template creds <modele>)
+  --hostname <nom>   nom d'hôte appliqué dans l'invité à chaque démarrage (modèle guestinfo :
+                     vazy template mark <modele> --guestinfo ; repli : vazy template creds)
 
 EXEMPLES
   vazy ubuntu-server
@@ -134,7 +137,7 @@ EXEMPLES
   vazy reset TP14                    le TP est cassé : retour à l'état neuf en quelques secondes
   vazy snap TP14 avant-dhcp          jalon, puis plus tard : vazy back TP14 avant-dhcp
   vazy lab up tp14-ad.json           un fichier décrit le TP entier (voir README, « Fichier de labo »)
-  vazy template creds ubuntu-server  puis  vazy ubuntu-server --hostname web1   (nom d'hôte dans l'invité)
+  vazy template mark ubuntu-server --guestinfo   puis   vazy ubuntu-server --hostname web1
 
 RÈGLE ABSOLUE
   Un modèle ne se démarre jamais et son instantané ne se supprime jamais :
@@ -161,7 +164,7 @@ function New-ErreurUsage {
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
     $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os')
-    $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm')
+    $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique')
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
         Options      = @{}
@@ -310,11 +313,16 @@ function Read-FichierLabo {
     if ($json -isnot [System.Management.Automation.PSCustomObject]) {
         $e = New-ErreurOutil "Le fichier $fichier doit contenir un objet JSON { ... }." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
     }
-    $clesLabo = @('labo', 'machines', 'delai')
+    # « requis » est réservé pour les prérequis d'un labo partagé (modèles attendus) :
+    # accepté dès maintenant pour que ces fichiers restent lisibles, pas encore vérifié.
+    $clesLabo = @('labo', 'machines', 'delai', 'requis')
     foreach ($p in $json.PSObject.Properties) {
         if ($clesLabo -notcontains $p.Name) {
             $e = New-ErreurOutil "Fichier $fichier : clé inconnue « $($p.Name) » au niveau du labo." ("Clés possibles : " + ($clesLabo -join ', ') + ". " + $conseilFormat); $e.Data['CodeSortie'] = 2; throw $e
         }
+    }
+    if ($json.PSObject.Properties['requis']) {
+        Write-MessageOutil -Type 'info' -Message "bloc « requis » présent : les prérequis ne sont pas encore vérifiés par cette version, les modèles doivent exister sous leur nom exact."
     }
     $nom = if ($json.PSObject.Properties['labo'] -and $json.labo) { ([string]$json.labo).Trim() } else { [System.IO.Path]::GetFileNameWithoutExtension($fichier) }
     if ($nom -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
@@ -555,14 +563,26 @@ function Invoke-CommandeTemplate {
             }
             $lignes = New-Object 'System.Collections.Generic.List[object]'
             foreach ($m in $modeles) {
-                $lignes.Add(@($m.Alias, $m.Instantane, [string]$m.Clones, $(if ($m.Os) { $m.Os } else { '(détecté)' }), $(if ($m.Invite) { $m.Invite } else { '-' }), $(if ($m.Present) { $m.Chemin } else { $m.Chemin + '  (INTROUVABLE)' })))
+                $methode = switch ($m.Methode) { 'guestinfo' { 'guestinfo' } 'identifiants' { 'identifiants (' + $m.Invite + ')' } default { 'aucune' } }
+                $lignes.Add(@($m.Alias, $m.Instantane, [string]$m.Clones, $(if ($m.Os) { $m.Os } else { '(détecté)' }), $methode, $(if ($m.Present) { $m.Chemin } else { $m.Chemin + '  (INTROUVABLE)' })))
             }
-            Write-Tableau -EnTetes @('ALIAS', 'INSTANTANÉ', 'CLONES', 'SYSTÈME', 'INVITÉ', 'FICHIER') -Lignes $lignes.ToArray() -Couleurs {
+            Write-Tableau -EnTetes @('ALIAS', 'INSTANTANÉ', 'CLONES', 'SYSTÈME', 'PERSONNALISATION', 'FICHIER') -Lignes $lignes.ToArray() -Couleurs {
                 param($colonne, $valeur)
-                if ($colonne -eq 5 -and $valeur -like '*(INTROUVABLE)') { 'Red' } else { $null }
+                if ($colonne -eq 5 -and $valeur -like '*(INTROUVABLE)') { return 'Red' }
+                if ($colonne -eq 4 -and $valeur -eq 'guestinfo') { return 'Green' }
+                return $null
             }
             Write-Host ''
-            Write-Host '  INVITÉ : compte de l''invité enregistré pour la personnalisation (vazy template creds <alias>), « - » si aucun.' -ForegroundColor Gray
+            Write-Host '  PERSONNALISATION : guestinfo (script dans le modèle, sans identifiant : vazy template mark <alias> --guestinfo),' -ForegroundColor Gray
+            Write-Host '  identifiants (repli : vazy template creds <alias>), ou aucune.' -ForegroundColor Gray
+        }
+        'mark' {
+            $usageMark = 'Usage : vazy template mark <alias> --guestinfo   (le script vazy-guestinfo est installé dans le modèle)   |   vazy template mark <alias> --classique'
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage $usageMark) }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $guestinfo = $Analyse.Options.ContainsKey('guestinfo'); $classique = $Analyse.Options.ContainsKey('classique')
+            if ($guestinfo -eq $classique) { throw (New-ErreurUsage $usageMark) }
+            Set-MarqueModele -Alias $Analyse.Positionnels[2] -Guestinfo $guestinfo
         }
         'creds' {
             $usageCreds = 'Usage : vazy template creds <alias> [--user <nom>] [--os linux|windows] [--rm]'
@@ -583,7 +603,9 @@ function Invoke-CommandeTemplate {
                 throw (New-ErreurOutil "Impossible de saisir les identifiants : la console n'est pas interactive." "Lancez cette commande dans un terminal. Le mot de passe est toujours saisi au clavier, masqué, jamais passé sur la ligne de commande.")
             }
             $actuel = Get-UtilisateurInvite -Alias $alias
-            Write-Host ("Identifiants d'un compte de l'invité pour le modèle « {0} »." -f $alias) -ForegroundColor White
+            Write-Host ("Identifiants d'un compte de l'invité pour le modèle « {0} » (méthode de repli)." -f $alias) -ForegroundColor White
+            Write-Host ('  Dans le cas courant, ce n''est plus nécessaire : installez le script vazy-guestinfo dans le modèle (dossier « invite » de vazy)') -ForegroundColor Yellow
+            Write-Host ('  puis « vazy template mark {0} --guestinfo » : aucun identifiant, aucun compte privilégié cloné dans vos VM.' -f $alias) -ForegroundColor Yellow
             Write-Host '  Le mot de passe est saisi masqué et stocké chiffré pour votre compte Windows sur ce PC (DPAPI) ; vazy ne l''affiche jamais.' -ForegroundColor Gray
             Write-Host '  Linux : un compte pouvant faire sudo sans mot de passe (ou root). Windows : un compte administrateur sans invite UAC.' -ForegroundColor Gray
             if ($actuel) { Write-Host ("  Identifiants actuels : utilisateur « {0} ». Ils seront remplacés." -f $actuel) -ForegroundColor Yellow }
@@ -608,7 +630,7 @@ function Invoke-CommandeTemplate {
             Remove-Modele -Alias $Analyse.Positionnels[2]
         }
         default {
-            throw (New-ErreurUsage 'Usage : vazy template add <chemin.vmx> [--name <alias>] | vazy template list | vazy template rm <alias> | vazy template creds <alias>')
+            throw (New-ErreurUsage 'Usage : vazy template add <chemin.vmx> [--name <alias>] | vazy template list | vazy template rm <alias> | vazy template mark <alias> --guestinfo|--classique | vazy template creds <alias>')
         }
     }
 }

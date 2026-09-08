@@ -5,3 +5,6 @@
 *.cmd text eol=crlf
 *.md text
 *.json text
+# Fichiers destinés à un invité Linux : toujours en LF
+*.sh text eol=lf
+*.service text eol=lf

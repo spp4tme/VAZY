@@ -1,0 +1,17 @@
+[Unit]
+Description=vazy : configuration de l'invite depuis guestinfo (nom d'hote, identite SSH)
+Documentation=https://github.com/spp4tme/VAZY
+DefaultDependencies=no
+ConditionVirtualization=vmware
+After=local-fs.target
+Before=network-pre.target sysinit.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vazy-guestinfo
+
+[Install]
+WantedBy=sysinit.target

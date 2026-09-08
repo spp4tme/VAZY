@@ -15,8 +15,8 @@
 # ============================================================================
 
 $script:NomOutil       = 'vazy'
-$script:VersionOutil   = '1.4.0'
-$script:VersionCatalogue = 5          # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionOutil   = '1.5.0'
+$script:VersionCatalogue = 6          # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -178,9 +178,14 @@ function Save-Config {
 #                 « vazy lab up » ; vide pour une VM créée à la main)
 #   version 5 : + modeles.<alias>.os ('linux' | 'windows' | '' = détecté)
 #               + vms.<nom>.nomHote (nom d'hôte demandé, '' = aucun)
-#               + vms.<nom>.nomHoteApplique (déjà appliqué dans l'invité ?)
 #               Les identifiants d'invité ne sont PAS dans le catalogue : voir
 #               le dossier creds (fichiers chiffrés par Export-CliXml).
+#   version 6 : + modeles.<alias>.guestinfo ($true = le modèle embarque le
+#                 script vazy-guestinfo ; la configuration est déposée avant
+#                 chaque démarrage, sans identifiant)
+#               - vms.<nom>.nomHoteApplique retiré (plus de réapplication)
+#   Les entrées gardent toute clé inconnue : de futurs champs (alias de
+#   modèles, empreinte du modèle...) s'ajoutent sans migration destructive.
 function Read-Catalogue {
     $lu = Read-FichierJson -Chemin $script:CheminCatalogue
     $c = New-Dictionnaire
@@ -209,7 +214,10 @@ function Read-Catalogue {
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('nomHote')) {
             $vm['nomHote'] = ''          # VM d'avant la phase 4 : pas de nom d'hôte demandé
-            $vm['nomHoteApplique'] = $false
+            $modifie = $true
+        }
+        if ($vm -is [System.Collections.IDictionary] -and $vm.Contains('nomHoteApplique')) {
+            $vm.Remove('nomHoteApplique')   # v6 : la réapplication après reset/back n'existe plus
             $modifie = $true
         }
     }
@@ -217,6 +225,10 @@ function Read-Catalogue {
         $m = $c['modeles'][$alias]
         if ($m -is [System.Collections.IDictionary] -and -not $m.Contains('os')) {
             $m['os'] = ''                # système invité : détecté par le pilote tant que non précisé
+            $modifie = $true
+        }
+        if ($m -is [System.Collections.IDictionary] -and -not $m.Contains('guestinfo')) {
+            $m['guestinfo'] = $false     # modèle d'avant la v6 : pas de script vazy-guestinfo connu
             $modifie = $true
         }
     }
@@ -417,7 +429,6 @@ function Get-VmDuCatalogue {
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo = [string]$vm['labo']
             NomHote = [string]$vm['nomHote']
-            NomHoteApplique = ($vm['nomHoteApplique'] -eq $true)
         }
     }
     if ($script:Catalogue['modeles'].Contains($Nom)) {
@@ -453,16 +464,17 @@ function New-VmDepuisModele {
             "Retirez l'une des deux options.")
     }
     Connect-Pilote | Out-Null
+    $infosModele = Get-ModeleDuCatalogue -Alias $Modele
+    $methode = if ($NomHote) { Get-MethodePersonnalisation -Alias $Modele } else { 'aucune' }
 
     $total = 5   # vérifications, clone, réglages, réseau, point de retour
     if ($Brut.Count -gt 0) { $total++ }
     if (-not $SansDemarrage) { $total++ }
-    if (-not $SansDemarrage -and $NomHote) { $total++ }
+    if (-not $SansDemarrage -and $methode -eq 'identifiants') { $total++ }   # repli : étape visible en plus
     $etape = 1
 
     # --- Étape 1 : vérifications --------------------------------------------
     Publish-Etape $etape $total "Vérifications"
-    $infosModele = Get-ModeleDuCatalogue -Alias $Modele
     if (-not (Test-Path -LiteralPath $infosModele['chemin'] -PathType Leaf)) {
         throw (New-ErreurOutil "Le fichier du modèle « $Modele » est introuvable : $($infosModele['chemin'])" `
             "Le modèle a été déplacé ou supprimé. Retirez-le du catalogue (vazy template rm $Modele) puis ré-enregistrez-le depuis son nouvel emplacement (vazy template add ...).")
@@ -569,25 +581,23 @@ function New-VmDepuisModele {
     $fiche['instantaneNeuf'] = $instantaneNeuf
     $fiche['ephemere'] = $false      # posé à $true seulement une fois la VM démarrée (voir ci-dessous)
     $fiche['labo']     = $Labo
-    $fiche['nomHote']  = $NomHote    # appliqué après le premier démarrage (voir Invoke-PersonnalisationSiNecessaire)
-    $fiche['nomHoteApplique'] = $false
+    $fiche['nomHote']  = $NomHote    # appliqué à chaque démarrage par vazy (voir Start-VmAvecPersonnalisation)
     $script:Catalogue['vms'][$Nom] = $fiche
     Save-Catalogue
 
-    # --- Étape 6 : démarrage ------------------------------------------------
+    # --- Étape 6 : démarrage (avec dépôt de la personnalisation) -------------
     if (-not $SansDemarrage) {
         $etape++
         Publish-Etape $etape $total $(if ($SansInterface) { "Démarrage sans fenêtre" } else { "Démarrage" })
-        $debut = $chrono.Elapsed.TotalSeconds
         try {
-            Start-Machine -Machine $chemin -SansInterface:$SansInterface
+            $titreRepli = '[{0}/{1}] Personnalisation de l''invité (repli par identifiants)' -f ($etape + 1), $total
+            Start-VmAvecPersonnalisation -Vm (Get-VmDuCatalogue -Nom $Nom) -SansInterface:$SansInterface -TitreEtapeIdentifiants $titreRepli | Out-Null
         } catch {
             $conseil = "La VM « $Nom » a bien été créée. " + $_.Exception.Data['Conseil'] + " Pour réessayer : vazy start $Nom"
             if ($Ephemere) { $conseil += ". Elle n'a PAS été marquée éphémère (elle ne sera pas supprimée automatiquement) : vazy rm $Nom pour l'effacer." }
             $_.Exception.Data['Conseil'] = $conseil
             throw
         }
-        Publish-Message 'ok' ("VM démarrée en {0}" -f (Format-Duree ($chrono.Elapsed.TotalSeconds - $debut)))
         if ($Ephemere) {
             # Marquée éphémère seulement maintenant : une VM dont le démarrage a
             # échoué reste une VM normale, à examiner ou à supprimer à la main.
@@ -596,11 +606,6 @@ function New-VmDepuisModele {
             $script:Catalogue['vms'][$Nom]['ephemere'] = $true
             Save-Catalogue
             Publish-Message 'info' "VM éphémère : supprimée automatiquement dès qu'elle sera trouvée éteinte (vazy stop $Nom, ou arrêt depuis l'intérieur puis n'importe quelle commande vazy)."
-        }
-        if ($NomHote) {
-            $etape++
-            Publish-Etape $etape $total "Personnalisation de l'invité"
-            Invoke-PersonnalisationSiNecessaire -Nom $Nom | Out-Null
         }
     }
 
@@ -660,10 +665,7 @@ function Start-VmParNom {
         return $vm
     }
     Invoke-AvertissementHyperV
-    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
-    Start-Machine -Machine $vm.Chemin -SansInterface:$SansInterface
-    Publish-Message 'ok' ("VM « {0} » démarrée en {1}" -f $vm.Nom, (Format-Duree $chrono.Elapsed.TotalSeconds))
-    Invoke-PersonnalisationSiNecessaire -Nom $vm.Nom | Out-Null
+    Start-VmAvecPersonnalisation -Vm $vm -SansInterface:$SansInterface | Out-Null
     return $vm
 }
 
@@ -984,12 +986,9 @@ function Invoke-LaboUp {
         }
         $apres = if (@($m.Apres).Count -gt 0) { ' (après ' + (@($m.Apres) -join ', ') + ')' } else { '' }
         Publish-Message 'etape' ("Démarrage de {0} -> VM « {1} »{2}" -f $m.Nom, $nomVm, $apres)
-        $debut = $chrono.Elapsed.TotalSeconds
-        Start-Machine -Machine $chemin -SansInterface:$m.SansInterface
-        Publish-Message 'ok' ("démarrée en {0}" -f (Format-Duree ($chrono.Elapsed.TotalSeconds - $debut)))
+        Start-VmAvecPersonnalisation -Vm (Get-VmDuCatalogue -Nom $nomVm) -SansInterface:$m.SansInterface | Out-Null
         $demarrees++
         $dejaDemarreIci = $true
-        Invoke-PersonnalisationSiNecessaire -Nom $nomVm | Out-Null   # nom d'hôte, si demandé et pas encore appliqué
     }
     return [pscustomobject]@{ Nom = $Labo.Nom; Creees = $aCreer.Count; Demarrees = $demarrees; Duree = $chrono.Elapsed.TotalSeconds }
 }
@@ -1157,35 +1156,116 @@ function Get-ScriptNomHote {
             ) -join '; ')
         }
         'windows' {
+            # Renomme sans redémarrer et rend la main avec le code 3 : c'est vazy
+            # qui pilote ensuite l'arrêt propre et le redémarrage (état déterministe).
             return @(
                 "`$nom = '$NomHote'",
                 'if ($env:COMPUTERNAME -ieq $nom) { exit 0 }',
-                'Rename-Computer -NewName $nom -Force -Restart -ErrorAction Stop'
+                'Rename-Computer -NewName $nom -Force -ErrorAction Stop',
+                'exit 3'
             ) -join "`n"
         }
     }
     return ''
 }
 
-# Applique le nom d'hôte demandé à une VM en marche, si ce n'est pas déjà
-# fait. Appelée après chaque démarrage effectué par vazy (création, start,
-# reset, back, lab up). Ne lève jamais d'exception liée à l'invité.
-function Invoke-PersonnalisationSiNecessaire {
-    param([Parameter(Mandatory = $true)][string]$Nom)
-    $vm = Get-VmDuCatalogue -Nom $Nom
-    if (-not $vm.NomHote -or $vm.NomHoteApplique) { return $false }
-    $nomHote = $vm.NomHote
+# Méthode de personnalisation d'un modèle :
+#   guestinfo    : recommandée. Le modèle embarque le script vazy-guestinfo ;
+#                  vazy dépose la configuration avant chaque démarrage, sans
+#                  aucun identifiant, et le script l'applique à chaque boot.
+#   identifiants : repli pour un modèle qu'on ne peut pas modifier : script
+#                  exécuté dans l'invité avec un compte (vazy template creds).
+#   aucune       : rien de configuré.
+function Get-MethodePersonnalisation {
+    param([Parameter(Mandatory = $true)][string]$Alias)
+    $modele = Get-ModeleDuCatalogue -Alias $Alias
+    if ($modele['guestinfo'] -eq $true) { return 'guestinfo' }
+    if (Test-Path -LiteralPath (Get-CheminIdentifiants -Alias $Alias) -PathType Leaf) { return 'identifiants' }
+    return 'aucune'
+}
 
-    $identifiants = $null
-    try { $identifiants = Get-IdentifiantsModele -Alias $vm.Modele }
-    catch { Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : {1} {2}" -f $nomHote, $_.Exception.Message, $_.Exception.Data['Conseil']); return $false }
-    if ($null -eq $identifiants) {
-        Publish-Message 'info' ("nom d'hôte « {0} » non appliqué : pas d'identifiants d'invité pour le modèle « {1} » (vazy template creds {1})." -f $nomHote, $vm.Modele)
-        return $false
+# Marque un modèle comme embarquant (ou non) le script vazy-guestinfo.
+function Set-MarqueModele {
+    param([Parameter(Mandatory = $true)][string]$Alias, [bool]$Guestinfo)
+    $modele = Get-ModeleDuCatalogue -Alias $Alias
+    $modele['guestinfo'] = $Guestinfo
+    Save-Catalogue
+    if ($Guestinfo) {
+        Publish-Message 'ok' "Modèle « $Alias » marqué guestinfo : vazy déposera la configuration (nom d'hôte) avant chaque démarrage de ses clones, sans aucun identifiant."
+        Publish-Message 'info' "Cela suppose que le script vazy-guestinfo est installé dans le modèle (dossier « invite » de vazy, README section « Préparer un modèle »)."
+    } else {
+        $repli = if (Test-Path -LiteralPath (Get-CheminIdentifiants -Alias $Alias) -PathType Leaf) { 'personnalisation par identifiants (repli)' } else { 'aucune personnalisation' }
+        Publish-Message 'ok' "Modèle « $Alias » marqué classique : $repli."
     }
-    $systeme = Get-SystemeModele -Alias $vm.Modele
+}
+
+# Charge utile déposée pour le script invité : JSON en base64 (aucun problème
+# d'échappement, quelle que soit la chaîne d'outils). Clés prévues : hostname
+# (seule appliquée aujourd'hui), puis ip, masque, passerelle, dns, cle_ssh.
+# Le script invité ignore toute clé qu'il ne connaît pas.
+function Get-ChargeUtileInvite {
+    param([string]$NomHote)
+    $config = [ordered]@{ hostname = $NomHote }
+    $json = ConvertTo-Json -InputObject $config -Compress
+    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+}
+
+# Démarre une VM en appliquant sa personnalisation (nom d'hôte demandé à la
+# création ou par le labo), selon la méthode de son modèle :
+#   guestinfo    : la configuration est déposée dans la machine AVANT le
+#                  démarrage ; le script du modèle l'applique à chaque boot.
+#                  Rien à réappliquer après reset ou back : le nom revient seul.
+#   identifiants : repli, script exécuté dans l'invité APRÈS le démarrage, à
+#                  chaque démarrage par vazy (idempotent) ; sous Windows un
+#                  renommage exige un redémarrage, que vazy pilote.
+# Jamais bloquant : un échec de personnalisation laisse la VM démarrée.
+# Renvoie la méthode utilisée.
+function Start-VmAvecPersonnalisation {
+    param(
+        [Parameter(Mandatory = $true)]$Vm,
+        [switch]$SansInterface,
+        [string]$TitreEtapeIdentifiants = "Personnalisation de l'invité (repli par identifiants)"
+    )
+    $modele = Get-ModeleDuCatalogue -Alias $Vm.Modele
+    $methode = if ($Vm.NomHote) { Get-MethodePersonnalisation -Alias $Vm.Modele } else { 'aucune' }
+    if ($Vm.NomHote) {
+        switch ($methode) {
+            'guestinfo' {
+                Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote $Vm.NomHote)
+                Publish-Message 'info' ("configuration déposée pour l'invité (guestinfo) : nom d'hôte « {0} », appliquée par le script du modèle à chaque démarrage." -f $Vm.NomHote)
+            }
+            'aucune' {
+                Publish-Message 'info' ("nom d'hôte « {0} » non appliqué : le modèle « {1} » n'est ni marqué guestinfo (vazy template mark {1} --guestinfo) ni doté d'identifiants (vazy template creds {1})." -f $Vm.NomHote, $Vm.Modele)
+            }
+        }
+    } elseif ($modele['guestinfo'] -eq $true) {
+        # Aucun nom demandé : ne laisse traîner aucune configuration antérieure.
+        Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' -Valeur ''
+    }
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    Start-Machine -Machine $Vm.Chemin -SansInterface:$SansInterface
+    Publish-Message 'ok' ("VM « {0} » démarrée en {1}" -f $Vm.Nom, (Format-Duree $chrono.Elapsed.TotalSeconds))
+    if ($methode -eq 'identifiants') {
+        Publish-Message 'etape' $TitreEtapeIdentifiants
+        Invoke-PersonnalisationParIdentifiants -Vm $Vm -SansInterface:$SansInterface | Out-Null
+    }
+    return $methode
+}
+
+# Repli par identifiants : attend les outils invité puis exécute le script de
+# renommage avec le compte enregistré. Sous Windows, après un renommage
+# effectif (code 3), vazy arrête proprement la VM et la redémarre lui-même.
+# Ne lève jamais d'exception liée à l'invité.
+function Invoke-PersonnalisationParIdentifiants {
+    param([Parameter(Mandatory = $true)]$Vm, [switch]$SansInterface)
+    $nomHote = $Vm.NomHote
+    $identifiants = $null
+    try { $identifiants = Get-IdentifiantsModele -Alias $Vm.Modele }
+    catch { Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : {1} {2}" -f $nomHote, $_.Exception.Message, $_.Exception.Data['Conseil']); return $false }
+    if ($null -eq $identifiants) { return $false }
+    $systeme = Get-SystemeModele -Alias $Vm.Modele
     if ($systeme -eq 'inconnu') {
-        Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : système invité du modèle « {1} » inconnu. Précisez-le : vazy template creds {1} --os linux|windows" -f $nomHote, $vm.Modele)
+        Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : système invité du modèle « {1} » inconnu. Précisez-le : vazy template creds {1} --os linux|windows" -f $nomHote, $Vm.Modele)
         return $false
     }
     $probleme = Test-NomHote -NomHote $nomHote -Systeme $systeme
@@ -1193,27 +1273,42 @@ function Invoke-PersonnalisationSiNecessaire {
         Publish-Message 'attention' "nom d'hôte non appliqué : $probleme"
         return $false
     }
-
     $delai = [int]$script:Config['delaiOutilsSec']
-    Publish-Message 'info' ("attente des outils invité de « {0} » (au plus {1} s)..." -f $vm.Nom, $delai)
+    Publish-Message 'info' ("attente des outils invité de « {0} » (au plus {1} s)..." -f $Vm.Nom, $delai)
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     $pret = $false
-    try { $pret = Wait-MachineOutils -Machine $vm.Chemin -DelaiMaxSec $delai }
+    try { $pret = Wait-MachineOutils -Machine $Vm.Chemin -DelaiMaxSec $delai }
     catch { Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : {1}" -f $nomHote, $_.Exception.Message); return $false }
     if (-not $pret) {
         Publish-Message 'attention' ("outils invité injoignables après {0} s : nom d'hôte « {1} » non appliqué. Vérifiez qu'open-vm-tools (Linux) ou VMware Tools (Windows) sont installés dans le modèle ; pour attendre plus longtemps : vazy config delaiOutilsSec 300. La VM reste utilisable ; nouvel essai au prochain démarrage par vazy." -f $delai, $nomHote)
         return $false
     }
     try {
-        Invoke-MachineScript -Machine $vm.Chemin -Identifiants $identifiants -Systeme $systeme -Script (Get-ScriptNomHote -Systeme $systeme -NomHote $nomHote) | Out-Null
-        $script:Catalogue['vms'][$vm.Nom]['nomHoteApplique'] = $true
-        Save-Catalogue
-        $suite = if ($systeme -eq 'windows') { ' ; Windows redémarre pour le prendre en compte' } else { '' }
-        Publish-Message 'ok' ("nom d'hôte « {0} » appliqué en {1}{2}" -f $nomHote, (Format-Duree $chrono.Elapsed.TotalSeconds), $suite)
+        $code = Invoke-MachineScript -Machine $Vm.Chemin -Identifiants $identifiants -Systeme $systeme -Script (Get-ScriptNomHote -Systeme $systeme -NomHote $nomHote)
+        switch ($code) {
+            0 {
+                Publish-Message 'ok' ("nom d'hôte « {0} » en place ({1})" -f $nomHote, (Format-Duree $chrono.Elapsed.TotalSeconds))
+            }
+            3 {
+                Publish-Message 'ok' ("nom d'hôte « {0} » enregistré dans l'invité ; redémarrage pour l'appliquer" -f $nomHote)
+                try { Stop-Machine -Machine $Vm.Chemin }
+                catch {
+                    if ($_.Exception.Message -notmatch 'Tools') { throw }
+                    Publish-Message 'attention' "arrêt propre impossible, arrêt forcé"
+                    Stop-Machine -Machine $Vm.Chemin -Brutal
+                }
+                Start-Machine -Machine $Vm.Chemin -SansInterface:$SansInterface
+                Publish-Message 'ok' ("VM « {0} » redémarrée avec le nom « {1} » ({2})" -f $Vm.Nom, $nomHote, (Format-Duree $chrono.Elapsed.TotalSeconds))
+            }
+            default {
+                Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : le script a échoué dans l'invité (code {1}). Droits insuffisants ? Sous Linux, le compte doit pouvoir faire sudo sans mot de passe (ou être root) ; sous Windows, il doit être administrateur sans invite UAC. La VM reste démarrée." -f $nomHote, $code)
+                return $false
+            }
+        }
         return $true
     } catch {
         $conseil = [string]$_.Exception.Data['Conseil']
-        Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : {1} {2} La VM reste créée et démarrée. Nouvel essai au prochain démarrage par vazy (vazy stop {3} puis vazy start {3})." -f $nomHote, $_.Exception.Message, $conseil, $vm.Nom)
+        Publish-Message 'attention' ("nom d'hôte « {0} » non appliqué : {1} {2} La VM reste créée et démarrée ; nouvel essai au prochain démarrage par vazy." -f $nomHote, $_.Exception.Message, $conseil)
         return $false
     } finally {
         $identifiants = $null
@@ -1326,7 +1421,6 @@ function Restore-InstantaneVm {
     $total = 1
     if ($enMarche) { $total++ }
     if (-not $SansDemarrage) { $total++ }
-    if (-not $SansDemarrage -and $vm.NomHote) { $total++ }
     $etape = 0
     if ($enMarche) {
         $etape++
@@ -1339,28 +1433,18 @@ function Restore-InstantaneVm {
     $debut = $chrono.Elapsed.TotalSeconds
     Restore-MachineInstantane -Machine $vm.Chemin -Nom $Libelle
     Publish-Message 'ok' ("terminé en {0}" -f (Format-Duree ($chrono.Elapsed.TotalSeconds - $debut)))
-    if ($vm.NomHote) {
-        # L'instantané date d'avant la personnalisation : le nom d'hôte sera
-        # réappliqué au prochain démarrage par vazy.
-        $script:Catalogue['vms'][$vm.Nom]['nomHoteApplique'] = $false
-        Save-Catalogue
-    }
     if (-not $SansDemarrage) {
+        # Le nom d'hôte demandé revient tout seul : modèle guestinfo, la
+        # configuration est redéposée avant ce démarrage et le script du modèle
+        # l'applique ; repli par identifiants, le script idempotent repasse.
         $etape++
         Publish-Etape $etape $total $(if ($SansInterface) { "Démarrage sans fenêtre" } else { "Démarrage" })
         Invoke-AvertissementHyperV
-        $debut = $chrono.Elapsed.TotalSeconds
         try {
-            Start-Machine -Machine $vm.Chemin -SansInterface:$SansInterface
+            Start-VmAvecPersonnalisation -Vm $vm -SansInterface:$SansInterface | Out-Null
         } catch {
             $_.Exception.Data['Conseil'] = "Le retour à « $Libelle » a bien eu lieu. " + $_.Exception.Data['Conseil'] + " Pour réessayer : vazy start $($vm.Nom)"
             throw
-        }
-        Publish-Message 'ok' ("VM démarrée en {0}" -f (Format-Duree ($chrono.Elapsed.TotalSeconds - $debut)))
-        if ($vm.NomHote) {
-            $etape++
-            Publish-Etape $etape $total "Personnalisation de l'invité"
-            Invoke-PersonnalisationSiNecessaire -Nom $vm.Nom | Out-Null
         }
     } elseif ($vm.Ephemere) {
         Publish-Message 'attention' "VM éphémère laissée éteinte : elle sera supprimée au prochain lancement de vazy, quelle que soit la commande."
@@ -1459,6 +1543,7 @@ function Add-Modele {
     $fiche['instantane'] = $Instantane
     $fiche['ajouteLe']   = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
     $fiche['os']         = ''      # système invité, détecté par le pilote ou précisé par « template creds --os »
+    $fiche['guestinfo']  = $false  # « vazy template mark <alias> --guestinfo » une fois le script installé dans le modèle
     $script:Catalogue['modeles'][$Alias] = $fiche
     Save-Catalogue
     # Marque de protection vérifiée par le pilote lui-même (démarrage,
@@ -1483,6 +1568,8 @@ function Get-ListeModeles {
             Chemin     = $m['chemin']
             Os         = [string]$m['os']
             Invite     = (Get-UtilisateurInvite -Alias $alias)
+            Guestinfo  = ($m['guestinfo'] -eq $true)
+            Methode    = (Get-MethodePersonnalisation -Alias $alias)
         }
     }
     return $liste   # l'appelant entoure de @() : vide -> tableau vide

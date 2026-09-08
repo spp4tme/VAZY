@@ -46,15 +46,18 @@
 #    Unprotect-MachineModele   -Machine          retirer la marque
 #    Test-MachineModele        -Machine          -> $true si marquée
 #
-#  Invité (phase 4, personnalisation) :
+#  Invité (personnalisation) :
+#    Set-MachineVariableInvite -Machine -Nom [-Valeur]
+#                                                dépose une variable guestinfo lisible dans
+#                                                l'invité (machine éteinte ; valeur vide = retire)
 #    Get-MachineSystemeInvite  -Machine          -> 'windows' | 'linux' | 'inconnu'
 #    Wait-MachineOutils        -Machine [-DelaiMaxSec]
 #                                                -> $true dès que les outils invité répondent,
 #                                                   $false passé le délai
 #    Invoke-MachineScript      -Machine -Identifiants -Systeme -Script
-#                                                exécute un script dans l'invité
-#                                                (Identifiants = PSCredential ; le mot de
-#                                                passe n'apparaît dans aucun message)
+#                                                exécute un script dans l'invité (repli par
+#                                                identifiants) ; renvoie son code de sortie ;
+#                                                le mot de passe n'apparaît dans aucun message
 #
 #  Toute erreur est levée sous forme d'exception dont Data['Conseil'] indique
 #  quoi faire pour corriger (voir New-ErreurPilote).
@@ -546,8 +549,27 @@ function Restore-MachineInstantane {
 }
 
 # ----------------------------------------------------------------------------
-#  Contrat du pilote : invité (phase 4)
+#  Contrat du pilote : invité
 # ----------------------------------------------------------------------------
+
+# Dépose une variable guestinfo dans la configuration de la machine : l'invité
+# la lit avec « vmtoolsd --cmd "info-get guestinfo.<nom>" ». Écrite dans le
+# .vmx, elle est persistante et se pose machine éteinte, avant le démarrage.
+# « vmrun writeVariable ... guestVar » ne convient pas ici : cette variante
+# n'existe qu'à l'exécution (perdue à l'extinction) et suppose la machine
+# allumée. Valeur vide : la variable est retirée.
+function Set-MachineVariableInvite {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom,
+        [string]$Valeur = ''
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'modifier la configuration invité de'
+    $vmx = Read-FichierVmx -Chemin $Machine
+    if ($Valeur) { Set-ValeurVmx -Vmx $vmx -Cle ('guestinfo.' + $Nom) -Valeur $Valeur }
+    else { Remove-ClesVmx -Vmx $vmx -MotifCle ('guestinfo\.' + [regex]::Escape($Nom)) }
+    Write-FichierVmx -Vmx $vmx
+}
 
 # Famille du système invité, d'après la clé guestOS du .vmx.
 function Get-MachineSystemeInvite {
@@ -574,12 +596,18 @@ function Wait-MachineOutils {
 }
 
 # Exécute un script dans l'invité, avec les identifiants d'un compte de
-# l'invité. Le script vient de la logique (il dépend du système invité, pas
-# de l'hyperviseur) ; ici on ne sait que le faire exécuter :
+# l'invité (chemin de repli : un modèle guestinfo n'en a pas besoin). Le
+# script vient de la logique (il dépend du système invité, pas de
+# l'hyperviseur) ; ici on ne sait que le faire exécuter :
 #   linux   : runScriptInGuest avec /bin/sh (VMware copie le texte dans un
 #             fichier temporaire de l'invité et l'exécute)
 #   windows : runProgramInGuest powershell.exe -EncodedCommand (le script est
 #             transmis en base64 : aucun problème de guillemets)
+# Renvoie le code de sortie du script dans l'invité (0 = succès ; la logique
+# donne un sens aux autres). Lève une exception si l'invité n'a pas pu
+# exécuter le script du tout. checkToolsState répond « running » un peu avant
+# que l'invité n'accepte réellement des commandes : ces échecs-là sont
+# retentés, pas les refus d'identifiants.
 # Le programme tourne avec les droits du compte fourni : sous Windows, un
 # compte administrateur soumis à l'UAC n'est PAS élevé.
 function Invoke-MachineScript {
@@ -587,7 +615,8 @@ function Invoke-MachineScript {
         [Parameter(Mandatory = $true)][string]$Machine,
         [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Identifiants,
         [Parameter(Mandatory = $true)][string]$Systeme,
-        [Parameter(Mandatory = $true)][string]$Script
+        [Parameter(Mandatory = $true)][string]$Script,
+        [int]$Tentatives = 4
     )
     Assert-MachinePasModele -Machine $Machine -Operation "exécuter un script dans"
     switch ($Systeme) {
@@ -603,21 +632,24 @@ function Invoke-MachineScript {
             throw (New-ErreurPilote "Système invité inconnu : « $Systeme »." "Indiquez-le au modèle : vazy template creds <modele> --os linux|windows")
         }
     }
-    $r = Invoke-Vmrun -Arguments $commande -Identifiants $Identifiants
-    if ($r.Code -ne 0) {
+    $message = ''
+    for ($essai = 1; $essai -le $Tentatives; $essai++) {
+        $r = Invoke-Vmrun -Arguments $commande -Identifiants $Identifiants
+        if ($r.Code -eq 0) { return 0 }
         $message = Get-MessageVmrun $r
-        $conseil = if ($message -match 'user name or password|Invalid user|authentication') {
-            "L'invité a refusé le compte « $($Identifiants.UserName) » : vérifiez l'utilisateur et le mot de passe (vazy template creds <modele>), et que ce compte peut ouvrir une session dans la VM."
-        } elseif ($message -match 'Tools') {
-            "Les outils VMware ne répondent pas dans l'invité : installez open-vm-tools (Linux) ou VMware Tools (Windows) dans le modèle."
-        } elseif ($message -match 'exit code') {
-            "Le script a échoué dans l'invité : droits insuffisants ? Sous Linux, le compte doit pouvoir faire sudo sans mot de passe (ou être root) ; sous Windows, il doit être administrateur sans invite UAC (compte Administrateur intégré)."
-        } else {
-            "Ouvrez la VM dans VMware Workstation pour voir ce qui se passe dans l'invité."
+        if ($message -match 'exit code:?\s*(\d+)') { return [int]$Matches[1] }   # le script a tourné : son code de sortie
+        if ($message -match 'user name or password|Invalid user|authentication') {
+            throw (New-ErreurPilote "Exécution dans l'invité impossible : $message" `
+                "L'invité a refusé le compte « $($Identifiants.UserName) » : vérifiez l'utilisateur et le mot de passe (vazy template creds <modele>), et que ce compte peut ouvrir une session dans la VM.")
         }
-        throw (New-ErreurPilote "Exécution dans l'invité impossible : $message" $conseil)
+        if ($essai -lt $Tentatives) { Start-Sleep -Seconds 5 }   # invité pas encore prêt : on réessaie
     }
-    return $r.Texte
+    $conseil = if ($message -match 'Tools') {
+        "Les outils VMware ne répondent pas dans l'invité : installez open-vm-tools (Linux) ou VMware Tools (Windows) dans le modèle, ou augmentez l'attente : vazy config delaiOutilsSec 300"
+    } else {
+        "Ouvrez la VM dans VMware Workstation pour voir ce qui se passe dans l'invité."
+    }
+    throw (New-ErreurPilote "Exécution dans l'invité impossible après $Tentatives tentatives : $message" $conseil)
 }
 
 # Supprimer un instantané. VMware fusionne ses disques avec la suite de la

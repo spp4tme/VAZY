@@ -56,6 +56,8 @@ Point technique, pour être précis : ce qui casse réellement les clones, c'est
      lib\logique.ps1          couche 2 : catalogue, vérifications, enchaînement
      lib\pilote-vmware.ps1    couche 3 : vmrun et fichiers .vmx
      exemples\tp14-ad.json    exemple de fichier de labo
+     invite\linux\            script d'auto-configuration à installer dans un modèle Linux
+     invite\windows\          idem pour un modèle Windows
      README.md
    ```
 
@@ -95,6 +97,11 @@ vazy config dossierVms D:\VMs
 
 À faire une seule fois par système (une fois pour Ubuntu Server, une fois pour Windows 11...). Comptez le temps d'une installation classique : c'est la dernière.
 
+Deux variantes, qui ne diffèrent qu'à l'étape 3.3 :
+
+- **Modèle guestinfo (recommandé)** : un petit script est installé dans le modèle. Au démarrage de chaque clone, il lit la configuration que vazy a déposée de l'extérieur (nom d'hôte) et l'applique lui-même. vazy n'entre jamais dans la VM, **aucun identifiant nulle part, aucun compte privilégié**.
+- **Modèle classique (repli)** : pour un modèle que vous ne pouvez pas modifier. La personnalisation passe alors par un compte de l'invité que vazy utilise depuis l'hôte (`vazy template creds`). **Ce compte privilégié est cloné dans toutes vos VM**, y compris celles que vous posez sur un segment réseau pendant un TP de sécurité : c'est une mauvaise posture, réservez-la aux cas sans alternative.
+
 ### 3.1 Créer la VM dans VMware Workstation
 
 1. `File > New Virtual Machine`, mode `Typical`.
@@ -113,11 +120,81 @@ vazy config dossierVms D:\VMs
    Sans ces outils, `vazy stop` ne peut pas demander un arrêt propre (il faudra `--hard`).
 3. Faites les mises à jour, installez ce que tous vos TP auront en commun (éditeur, SSH, etc.).
 4. Nettoyez : `sudo apt clean` sous Linux ; retirez l'ISO du lecteur CD virtuel (`VM > Settings > CD/DVD`, décochez `Connect at power on`).
-5. **Éteignez la VM proprement, depuis l'intérieur du système.**
 
-### 3.3 Prendre l'instantané
+### 3.3 Variante guestinfo (recommandée) : installer le script d'auto-configuration
 
-VM éteinte, dans VMware Workstation : `VM > Snapshot > Take Snapshot...`, nommez-le `base`, validez.
+Les fichiers sont dans le dossier `invite` de vazy.
+
+**Linux (Ubuntu Server, Debian, tout système avec systemd)** : un seul fichier à transférer, `invite\linux\installer.sh`, qui contient le script et son unité systemd. Depuis Windows, avec l'adresse IP de la VM (`ip a` dedans) :
+
+```
+scp "C:\Outils\vazy\invite\linux\installer.sh" etudiant@192.168.x.y:/tmp/
+```
+
+Puis dans la VM :
+
+```
+sudo sh /tmp/installer.sh
+```
+
+Ce que ça installe : `/usr/local/sbin/vazy-guestinfo` (script POSIX, sans dépendance) et `vazy-guestinfo.service`, une unité systemd lancée à chaque démarrage **avant le réseau**, qui :
+
+- lit `guestinfo.vazy_config` avec `vmtoolsd --cmd "info-get ..."` (open-vm-tools) ;
+- applique le nom d'hôte : `hostnamectl set-hostname` si D-Bus est déjà disponible, sinon écriture directe de `/etc/hostname`, ce qui revient au même, puis mise à jour de la ligne `127.0.1.1` de `/etc/hosts` ;
+- régénère les clés d'identité du serveur SSH et `/etc/machine-id` quand elles viennent d'une autre machine (l'UUID du BIOS change à chaque clone ; le script mémorise celui pour lequel il a généré les clés dans `/var/lib/vazy/identite.uuid`). Sans cela, tous les clones ont la même empreinte SSH, et deux clones Ubuntu demandent la même adresse au DHCP ;
+- ne fait rien si la variable est absente ou vide, ni si tout est déjà en place : idempotent, jamais de redémarrage.
+
+Pas de `scp` possible ? Ouvrez `installer.sh` dans un éditeur sur Windows, collez son contenu dans la VM avec `cat > /tmp/installer.sh` puis `Ctrl+D`. Il doit rester en fins de ligne LF (c'est le cas du fichier livré).
+
+**Windows** : copiez le dossier `invite\windows` dans la VM (lecteur partagé, `scp` si OpenSSH est installé, ou clé USB), puis en administrateur :
+
+```
+powershell -ExecutionPolicy Bypass -File installer.ps1
+```
+
+Ce que ça installe : `C:\ProgramData\vazy\vazy-guestinfo.ps1` et une tâche planifiée `vazy-guestinfo` lancée au démarrage sous le compte SYSTEM, qui lit la variable avec `vmtoolsd.exe`, applique `Rename-Computer` **sans redémarrer si le nom est déjà le bon**, redémarre une seule fois après un renommage effectif (Windows ne prend un nouveau nom qu'au redémarrage), et régénère les clés du serveur OpenSSH s'il est installé. Journal : `C:\ProgramData\vazy\vazy-guestinfo.log`. Le SID de la machine, lui, reste celui du modèle : seul `sysprep` le change, hors périmètre.
+
+Une fois le script installé, passez à l'étape 3.4.
+
+### 3.3 bis Variante classique (repli) : un compte pour vazy
+
+Rien à installer dans le modèle, mais il faut un compte que vazy utilisera depuis l'hôte, après le démarrage, pour exécuter le renommage :
+
+- Linux : un compte pouvant faire `sudo` **sans mot de passe** (`echo "etudiant ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/vazy`), ou `root`.
+- Windows : le compte `Administrateur` intégré, activé, avec mot de passe (un administrateur ordinaire est bloqué par l'UAC, VMware ne l'élève pas).
+
+Ce compte sera présent dans chaque clone. Après l'enregistrement du modèle (3.5) : `vazy template creds <alias>`.
+
+### 3.4 Vider ce qui mémorise la machine (Linux, obligatoire avant l'instantané)
+
+Un clone a de **nouvelles cartes réseau** (adresses MAC régénérées). Si le modèle a mémorisé l'ancienne carte, le clone se retrouve avec une interface qui ne correspond à rien et **n'a plus de réseau du tout**. Avant d'éteindre le modèle, vérifiez et nettoyez :
+
+1. **netplan (Ubuntu)** : `cat /etc/netplan/*.yaml`. S'il contient `match: macaddress:` ou `set-name:`, la configuration est liée à la MAC du modèle. Remplacez le fichier par une configuration générique :
+
+   ```yaml
+   network:
+     version: 2
+     ethernets:
+       toutes:
+         match:
+           name: "en*"
+         dhcp4: true
+   ```
+
+   Si le fichier s'appelle `50-cloud-init.yaml`, cloud-init le régénérera : désactivez sa gestion du réseau avec `sudo sh -c 'echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg'`.
+2. **Règles udev persistantes** (Debian ancien, autres) : `sudo rm -f /etc/udev/rules.d/70-persistent-net.rules`.
+3. **Fichiers `.link` systemd** liant un nom d'interface à une MAC : `ls /etc/systemd/network/*.link` ; supprimez ceux qui contiennent `MACAddress=`.
+4. **NetworkManager** (Debian bureau, Fedora) : dans `/etc/NetworkManager/system-connections/*.nmconnection`, retirez toute ligne `mac-address=`, ou supprimez les profils pour qu'il en recrée.
+5. **Baux DHCP** mémorisés : `sudo rm -f /var/lib/dhcp/*.leases /var/lib/NetworkManager/*.lease; sudo rm -rf /run/systemd/netif/leases`.
+6. **Identifiant machine** : `/etc/machine-id` sert d'identifiant DHCP à systemd-networkd. Le script guestinfo le régénère sur chaque clone ; pour un modèle classique, videz-le : `sudo truncate -s 0 /etc/machine-id` (systemd en génère un neuf au premier démarrage).
+
+Vérification : `ip -br link` doit montrer une interface nommée `ens33` ou `ens160` ; c'est ce nom, issu de l'emplacement PCI, qui reste stable d'un clone à l'autre, contrairement à la MAC.
+
+Windows n'a pas ce problème pour le réseau ; le SID dupliqué est un autre sujet (sysprep), hors périmètre.
+
+### 3.5 Éteindre, prendre l'instantané, enregistrer le modèle
+
+**Éteignez la VM proprement, depuis l'intérieur du système.** Puis, VM éteinte, dans VMware Workstation : `VM > Snapshot > Take Snapshot...`, nommez-le `base`, validez.
 
 Ou en ligne de commande :
 
@@ -125,24 +202,26 @@ Ou en ligne de commande :
 "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe" -T ws snapshot "D:\VMs\ubuntu-server\ubuntu-server.vmx" base
 ```
 
-### 3.4 Enregistrer le modèle dans vazy
+Enregistrez le modèle dans vazy :
 
 ```
 vazy template add "D:\VMs\ubuntu-server\ubuntu-server.vmx"
+vazy template mark ubuntu-server --guestinfo        (variante guestinfo uniquement)
 ```
 
 - L'alias par défaut est le nom du fichier sans extension (`ubuntu-server`). Pour en choisir un autre : `--name <alias>`.
 - Si la VM a plusieurs instantanés, le dernier de la liste est utilisé ; pour en imposer un : `--snapshot <nom>`.
 - vazy refuse d'enregistrer une VM sans instantané et explique comment en créer un.
 - vazy pose un fichier témoin à côté de la VM (`ubuntu-server.vmx.vazy-modele`). Tant qu'il existe, vazy refuse de démarrer, supprimer ou modifier les instantanés de cette VM, même par erreur de manipulation du catalogue.
+- `template mark --guestinfo` dit à vazy que le script est dans le modèle : dès lors, `--hostname` et la clé `hostname` des labos passent par le dépôt de configuration, sans identifiant. `vazy template list` affiche la méthode de chaque modèle.
 
 C'est terminé. **Ne redémarrez plus jamais cette VM.** Créez vos machines de TP :
 
 ```
-vazy ubuntu-server
+vazy ubuntu-server --hostname web1
 ```
 
-### 3.5 Mettre à jour un modèle (procédure d'exception)
+### 3.6 Mettre à jour un modèle (procédure d'exception)
 
 Si un jour vous devez modifier le modèle (nouvelle version d'un paquet, par exemple), voici la seule façon sûre :
 
@@ -234,7 +313,8 @@ VM « TP14 » prête et démarrée en 12,4 s.
 | `vazy template add <chemin.vmx> [--name <alias>] [--snapshot <nom>]` | Enregistre un modèle (le dossier de la VM est accepté à la place du `.vmx`) |
 | `vazy template list` | Modèles enregistrés, instantané utilisé, nombre de clones |
 | `vazy template rm <alias>` | Retire un modèle du catalogue ; **aucun fichier n'est supprimé** |
-| `vazy template creds <alias> [--user <nom>] [--os linux\|windows] [--rm]` | Identifiants d'un compte de l'invité, pour la personnalisation (mot de passe saisi masqué, stocké chiffré) |
+| `vazy template mark <alias> --guestinfo\|--classique` | Déclare que le modèle embarque le script `vazy-guestinfo` : personnalisation sans identifiant |
+| `vazy template creds <alias> [--user <nom>] [--os linux\|windows] [--rm]` | Repli pour un modèle non modifiable : identifiants d'un compte de l'invité (mot de passe saisi masqué, stocké chiffré) |
 | `vazy config [<cle> <valeur>]` | Affiche ou modifie la configuration |
 | `vazy help`, `vazy version` | |
 
@@ -385,31 +465,23 @@ client   tp14-ad-client  en marche  win11    4 Go  2    nat,hostonly  dc01,srv01
 
 ### Personnalisation de l'invité (nom d'hôte)
 
-Les clones d'un modèle sont identiques : même nom d'hôte, même identifiant machine, mêmes clés SSH. Pour un TP réseau, vazy peut au moins **renommer la machine** dans l'invité après le démarrage. C'est entièrement optionnel : sans identifiants enregistrés, rien ne change.
+Les clones d'un modèle sont identiques : même nom d'hôte, même identifiant machine, mêmes clés SSH. vazy peut donner à chaque clone son **nom d'hôte**, avec `--hostname` ou, dans un labo, le nom court de chaque machine par défaut. Deux méthodes, choisies d'après le modèle (`vazy template list` l'affiche) :
 
+**Méthode guestinfo (recommandée, sans identifiant).** Le modèle embarque le script `vazy-guestinfo` (section 3.3) et est marqué `vazy template mark <alias> --guestinfo`. Avant **chaque** démarrage fait par vazy (création, `start`, `reset`, `back`, `lab up`), vazy dépose la configuration dans la machine, sous forme d'une variable `guestinfo.vazy_config` que le script lit au démarrage avec les outils invité et applique lui-même. vazy n'entre jamais dans la VM. Rien à réappliquer après `reset` ou `back` : le script relit la variable à chaque démarrage, le nom revient tout seul. Aucune attente, aucun compte, aucun mot de passe nulle part.
+
+La charge utile est du JSON encodé en base64, pour éviter tout problème d'échappement :
+
+```json
+{ "hostname": "web1" }
 ```
-vazy template creds ubuntu-server          (une fois par modèle : utilisateur, puis mot de passe saisi masqué)
-vazy ubuntu-server --hostname web1         (ou, dans un labo : le nom court de chaque machine, par défaut)
-```
 
-Comment ça marche : après le démarrage, vazy attend que les outils invité répondent (`delaiOutilsSec`, 120 s par défaut), puis exécute un petit script dans la VM avec le compte enregistré : `hostnamectl set-hostname` et mise à jour de `/etc/hosts` sous Linux, `Rename-Computer` puis redémarrage sous Windows (un nouveau nom Windows n'est pris en compte qu'au redémarrage). Le script ne fait rien si l'invité porte déjà ce nom. Le nom demandé est mémorisé au catalogue : `vazy reset` revient à un instantané antérieur au renommage, vazy le réapplique donc après le redémarrage ; de même après `vazy back`.
+Le format accueillera plus tard `ip`, `masque`, `passerelle`, `dns`, `cle_ssh` ; seul `hostname` est appliqué aujourd'hui, et le script invité ignore toute clé qu'il ne connaît pas. Détail technique : la variable est écrite dans la configuration de la VM (clé `guestinfo.vazy_config` du `.vmx`), machine éteinte, ce qui la rend persistante ; `vmrun writeVariable ... guestVar` n'aurait pas convenu, cette forme n'existe qu'à l'exécution et disparaît à l'extinction.
 
-Prérequis dans le **modèle** :
+**Méthode classique (repli, par identifiants).** Pour un modèle qu'on ne peut pas modifier : `vazy template creds <alias>` enregistre un compte de l'invité (mot de passe saisi masqué, stocké chiffré par DPAPI dans `%LOCALAPPDATA%\vazy\creds\<alias>.xml`, lisible uniquement par votre compte Windows sur ce PC ; jamais affiché, masqué par `***` dans tout message venant de VMware). Après chaque démarrage fait par vazy, celui-ci attend que les outils invité répondent (`delaiOutilsSec`, 120 s par défaut, avec nouvelles tentatives sur le premier script, car les outils se disent prêts un peu avant de l'être), puis exécute le script de renommage dans la VM : `hostnamectl` et `/etc/hosts` sous Linux ; `Rename-Computer` sous Windows, **sans redémarrer** : le script rend la main et c'est vazy qui arrête proprement la VM puis la redémarre, pour un état déterministe. Le script est idempotent. Limite à connaître : `vmrun` ne reçoit ces identifiants que par `-gu` et `-gp` sur sa ligne de commande, visible pendant les quelques secondes de l'appel pour les processus de votre compte Windows ; et surtout, ce compte privilégié est cloné dans toutes vos VM.
 
-- Les outils invité installés : `open-vm-tools` sous Linux, VMware Tools sous Windows. Sans eux, vazy attend le délai puis abandonne avec un message.
-- Linux : un compte qui peut faire `sudo` **sans mot de passe** (ou `root`). Une ligne dans le modèle : `echo "etudiant ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/vazy`.
-- Windows : un compte administrateur **non soumis à l'invite UAC**. VMware lance le programme avec le jeton du compte tel quel, sans élévation ; `Rename-Computer` échoue alors avec un compte administrateur ordinaire. Le compte `Administrateur` intégré (activé, avec mot de passe) convient.
+Règle absolue, dans les deux méthodes : si la personnalisation échoue (script absent du modèle, outils absents, identifiants refusés, nom invalide), **la VM reste créée et démarrée**. vazy avertit avec la cause et la marche à suivre.
 
-Sécurité, ce qui est garanti :
-
-- Le mot de passe est saisi au clavier, masqué, jamais sur la ligne de commande de vazy. Il est stocké par `Export-CliXml` dans `%LOCALAPPDATA%\vazy\creds\<alias>.xml`, chiffré par DPAPI : le fichier n'est lisible que par votre compte Windows sur ce PC. Copié ailleurs, il est inutilisable.
-- vazy n'écrit aucun journal, n'affiche jamais le mot de passe, et masque sa valeur (`***`) dans tout message venant de VMware.
-
-Sécurité, la limite qu'il faut connaître : `vmrun` n'a **aucun autre moyen** de recevoir les identifiants de l'invité que ses options `-gu` et `-gp` sur sa ligne de commande. Pendant les quelques secondes de l'appel (`checkToolsState` n'en a pas besoin, seul le script de renommage en a), le mot de passe est donc visible dans la ligne de commande du processus `vmrun.exe`, pour les processus qui tournent sous votre compte Windows ou en administrateur (Gestionnaire des tâches, colonne « Ligne de commande »). Sur un PC personnel, c'est vous-même. Si cette exposition n'est pas acceptable, la seule alternative est de ne pas utiliser d'identifiants du tout : un script dans le modèle qui lit le nom d'hôte via `vmtoolsd --cmd "info-get guestinfo.hostname"` au démarrage, vazy le déposant avec `vmrun writeVariable`. Ce mécanisme n'est pas implémenté dans cette version.
-
-Règle absolue : si la personnalisation échoue (outils absents, identifiants refusés, droits insuffisants, nom invalide), **la VM reste créée et démarrée**. vazy avertit avec la cause et la marche à suivre, puis réessaie au prochain démarrage fait par vazy (`vazy stop x` puis `vazy start x`).
-
-Ce qui n'est pas fait dans cette version : IP fixe, clé SSH, identifiant machine (SID, `machine-id`). Le renommage doit d'abord tenir la route.
+Ce qui n'est pas fait dans cette version : IP fixe, clé SSH de l'utilisateur, SID Windows. Le format et le script sont prêts à les accueillir ; le nom d'hôte doit d'abord tenir la route sur un vrai TP.
 
 ---
 
@@ -512,6 +584,9 @@ Les clés `apres` de ces machines forment une boucle (a après b, b après a). L
 **« La VM ... existe déjà mais appartient à une VM créée à la main / au labo ... »**
 Le nom préfixé est déjà pris par une VM qui n'a pas été créée par ce labo. Changez le nom du labo ou de la machine dans le fichier, ou supprimez cette VM.
 
+**Le nom d'hôte n'est pas appliqué sur un modèle guestinfo (rien ne se passe au démarrage)**
+Dans la VM : `systemctl status vazy-guestinfo` (Linux) ou le journal `C:\ProgramData\vazy\vazy-guestinfo.log` (Windows). Vérifiez que `vmtoolsd --cmd "info-get guestinfo.vazy_config"` affiche une valeur dans la VM : si « No value found », vazy n'a rien déposé (le modèle n'est peut-être pas marqué : `vazy template list`) ; si une valeur base64 apparaît, le script ne s'est pas exécuté (unité désactivée, script installé après l'instantané).
+
 **« nom d'hôte ... non appliqué : outils invité injoignables après 120 s »**
 Les outils invité ne sont pas installés dans le modèle, ou l'invité met plus longtemps à démarrer. Installez `open-vm-tools` / VMware Tools dans le modèle ; pour un invité lent, `vazy config delaiOutilsSec 300`. La VM tourne quand même ; le nom sera réessayé au prochain démarrage par vazy.
 
@@ -552,7 +627,7 @@ Volontairement hors périmètre :
 - **Réseaux personnalisés (VMnet2, VMnet3...)** : ils se créent dans le Virtual Network Editor avec les droits administrateur. vazy ne les gère pas, ni en ligne de commande ni dans un fichier de labo : `mode` ne connaît que `nat`, `bridged` et `hostonly`. Une fois un VMnet créé à la main, `--set ethernet0.connectionType=custom --set ethernet0.vnet=VMnet2` permet quand même de s'y brancher, sans aucune vérification.
 - **Autres hyperviseurs** : seul VMware Workstation est pris en charge ; l'architecture est prête pour VirtualBox et Hyper-V (section 9).
 - **Interface graphique** : aucune.
-- **Identité de l'invité** : le nom d'hôte peut être appliqué par vazy (section « Personnalisation de l'invité »), mais les clones gardent le même identifiant machine (SID Windows, `/etc/machine-id`), les mêmes clés SSH et la même configuration IP. À traiter dans le modèle ou à la main pour l'instant.
+- **Identité de l'invité** : le nom d'hôte est appliqué par vazy (section « Personnalisation de l'invité ») ; avec un modèle guestinfo, les clés SSH du serveur et `/etc/machine-id` sont régénérés sur chaque clone. Restent identiques : le SID Windows (sysprep) et la configuration IP (DHCP pour l'instant).
 - **Une commande vazy à la fois** : le catalogue est lu au début de chaque commande et réécrit à la fin. Deux commandes vazy lancées en parallèle dans deux terminaux peuvent s'écraser mutuellement leurs modifications du catalogue.
 
 ---
@@ -603,9 +678,10 @@ L'invité (personnalisation) :
 
 | Fonction | Rôle |
 |---|---|
+| `Set-MachineVariableInvite -Machine -Nom [-Valeur]` | Dépose une variable guestinfo lisible dans l'invité (machine éteinte ; valeur vide = retire) |
 | `Get-MachineSystemeInvite -Machine` | `linux`, `windows` ou `inconnu`, d'après la configuration de la machine |
 | `Wait-MachineOutils -Machine [-DelaiMaxSec]` | `$true` dès que les outils invité répondent, `$false` passé le délai |
-| `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité avec un `PSCredential` ; le mot de passe n'apparaît dans aucun message |
+| `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité avec un `PSCredential` (repli) et renvoie son code de sortie ; retente si l'invité n'est pas encore prêt ; le mot de passe n'apparaît dans aucun message |
 
 La marque « modèle », que le pilote vérifie lui-même avant de démarrer, supprimer ou toucher aux instantanés d'une machine :
 
@@ -619,7 +695,7 @@ Toute erreur est une exception dont `Data['Conseil']` dit quoi faire ; la couche
 
 ### Ajouter un pilote
 
-1. Créez `lib\pilote-virtualbox.ps1` qui définit ces dix-huit fonctions avec les mêmes paramètres et les mêmes retours (le chemin de machine devient par exemple celui du `.vbox`, `ExtensionMachine = '.vbox'`).
+1. Créez `lib\pilote-virtualbox.ps1` qui définit ces dix-neuf fonctions avec les mêmes paramètres et les mêmes retours (le chemin de machine devient par exemple celui du `.vbox`, `ExtensionMachine = '.vbox'`).
 2. `vazy config hyperviseur virtualbox`.
 
 Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre à un hyperviseur.
