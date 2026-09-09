@@ -311,9 +311,10 @@ VM « TP14 » prête et démarrée en 12,4 s.
 | `vazy vnc <nom> [off]` | Affiche le lien pour voir l'écran de la VM à distance ; l'active si besoin |
 | `vazy doctor` | Diagnostic complet : hyperviseur, disque, modèles, VM, cohérence catalogue / disque |
 | `vazy freeze <nom> [--yes]` | Convertit un clone lié en VM complète : elle ne dépend plus du modèle |
-| `vazy lab up <fichier.json>` | Monte un labo entier décrit par un fichier (voir ci-dessous) |
-| `vazy lab status <fichier.json>` | État de chaque machine du labo |
-| `vazy lab down <fichier.json> [--yes] [--stop-only] [--hard]` | Arrête et supprime le labo, après confirmation ; `--stop-only` arrête sans supprimer |
+| `vazy lab up <nom> [--vm nom:modele:ram] ... [--save]` | Monte un labo décrit en une ligne, ou remonte un labo enregistré ; `--save` garde la recette |
+| `vazy lab new <nom>` | Assistant : questions une par une, puis écriture du fichier |
+| `vazy lab status <nom>` | État de chaque machine du labo |
+| `vazy lab down <nom> [--yes] [--stop-only] [--hard]` | Arrête et supprime le labo, après confirmation ; `--stop-only` arrête sans supprimer |
 | `vazy lab export <fichier.json> --labo <nom>\|--prefixe <p>\|--vms a,b,c [--requis]` | Génère le fichier de labo qui recréerait des VM existantes |
 | `vazy template alias <alias> <nom standard> [--rm]` | Fait répondre votre modèle à un nom standard, pour monter un labo partagé |
 | `vazy template add <chemin.vmx> [--name <alias>] [--snapshot <nom>]` | Enregistre un modèle (le dossier de la VM est accepté à la place du `.vmx`) |
@@ -404,17 +405,50 @@ Garde-fous :
 
 Ce qu'il faut savoir sur VMware Workstation : fermer la fenêtre d'une VM en marche ne l'éteint pas forcément. Selon la préférence `Edit > Preferences > Workspace`, la VM continue de tourner en arrière-plan. Une VM éphémère qui tourne encore n'est pas supprimée. Pour être sûr : éteignez-la depuis l'intérieur (`shutdown`, `poweroff`), ou `vazy stop <nom>`, qui l'arrête proprement et la supprime.
 
-### Fichier de labo
+### Monter un labo
 
-Un fichier décrit un TP entier, une commande le monte :
+Un labo est un TP entier : plusieurs VM créées, réglées et démarrées ensemble, dans le bon ordre. Trois façons de le décrire, du plus rapide au plus complet.
+
+**En une ligne.** C'est la façon normale :
 
 ```
-vazy lab up tp14-ad.json
-vazy lab status tp14-ad.json
-vazy lab down tp14-ad.json
+vazy lab up tp14 --vm dc01:win2022:4 --vm srv01:win2022:2 --vm client:win11:4 --save
 ```
 
-Le format est du JSON (PowerShell le lit nativement ; pas de YAML, qui demanderait une dépendance). Exemple complet, fourni dans `exemples\tp14-ad.json` :
+Chaque `--vm` décrit une machine, au format `nom:modele:ram`, avec un quatrième champ facultatif pour le nombre de cœurs (`dc01:win2022:4:2`). La RAM peut être omise (`dc01:win2022`), la valeur par défaut ou celle de `--ram` s'applique alors.
+
+Les options générales valent pour **toutes** les machines du labo : `--mode`, `--vnc`, `--cpu`, `--ram`, `--nogui`, `--set`, `--delai`. Le nom de chaque machine lui sert aussi de nom d'hôte, et les machines démarrent dans l'ordre où vous les avez écrites, avec le délai entre chacune.
+
+**`--save` garde la recette.** vazy monte le labo, puis écrit le fichier qui correspond aux VM réellement créées. La semaine suivante, une seule commande suffit :
+
+```
+vazy lab up tp14
+```
+
+vazy retrouve le fichier tout seul, où que vous soyez : il cherche `tp14` puis `tp14.json` dans le dossier courant, puis dans son dossier de labos (`%LOCALAPPDATA%\vazy\labos`, réglable avec `dossierLabos`). C'est ce qui permet de remonter un TP depuis une session SSH sans se soucier du répertoire courant. Si le fichier existe déjà, vazy demande confirmation avant de le remplacer.
+
+**L'assistant**, pour un labo compliqué ou quand vous ne connaissez pas encore les options :
+
+```
+vazy lab new tp14
+```
+
+Les questions viennent une par une, avec une valeur par défaut entre crochets : nombre de machines, délai, puis pour chacune son nom, son modèle choisi dans la liste affichée, sa RAM, ses cœurs, son réseau, son écran distant, et si elle doit démarrer après la précédente. Le fichier est écrit à la fin ; rien n'est monté. L'assistant refuse de s'exécuter hors d'un terminal interactif.
+
+**Le fichier reste le format de stockage, jamais une saisie.** Vous le récoltez avec `--save`, `lab new` ou `lab export`, vous ne l'écrivez pas à la main.
+
+Deux choses à savoir sur `--save`. Il n'enregistre que les machines de la commande : si d'autres VM sont rattachées au même labo, vazy le signale et les laisse en place, et `lab down` les démontera quand même. Et il ne mémorise pas `--nogui`, qui décrit une façon de démarrer plutôt que la machine elle-même. Au remontage, les VM s'ouvrent donc dans une fenêtre ; ajoutez `"nogui": true` au fichier si vous les voulez toujours sans fenêtre.
+
+Les autres commandes acceptent indifféremment le nom du labo ou le chemin d'un fichier :
+
+```
+vazy lab status tp14
+vazy lab down tp14
+```
+
+### Le fichier de labo
+
+Le format est du JSON (PowerShell le lit nativement ; pas de YAML, qui demanderait une dépendance). Vous n'avez normalement pas à l'écrire, mais le relire est utile, et le modifier reste possible. Exemple complet, fourni dans `exemples\tp14-ad.json` :
 
 ```json
 {
@@ -515,7 +549,7 @@ L'export **rattache les VM exportées au labo** : elles gardent leur nom, mais `
 }
 ```
 
-À l'autre bout, celui qui reçoit le fichier lance `vazy lab up tp20.json`. **Les prérequis sont vérifiés avant toute action** : si un modèle manque, vazy refuse et dit quoi préparer, sans avoir créé la moindre VM. Le système et la taille de disque déclarés produisent un avertissement s'ils ne correspondent pas, sans bloquer.
+À l'autre bout, celui qui reçoit le fichier le pose dans son dossier de labos et lance `vazy lab up tp20`. **Les prérequis sont vérifiés avant toute action** : si un modèle manque, vazy refuse et dit quoi préparer, sans avoir créé la moindre VM. Le système et la taille de disque déclarés produisent un avertissement s'ils ne correspondent pas, sans bloquer.
 
 Le problème classique : le labo demande `win2022`, mais votre modèle s'appelle `windows-server`. Plutôt que de renommer, déclarez une correspondance locale, une fois pour toutes :
 
@@ -716,6 +750,7 @@ Clés de `config.json`, modifiables avec `vazy config <cle> <valeur>` (valeur `"
 | `espaceDisqueMinGo` | Marge d'espace libre exigée, en plus de la RAM de la VM | `1` |
 | `delaiOutilsSec` | Attente maximale des outils invité avant d'appliquer un nom d'hôte (5 à 1800 s) | `120` |
 | `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants des VM | `5901`, `5999` |
+| `dossierLabos` | Où sont rangés les fichiers de labo, retrouvés par leur nom | `%LOCALAPPDATA%\vazy\labos` |
 | `hyperviseur` | Pilote utilisé (`lib\pilote-<hyperviseur>.ps1`) | `vmware` |
 
 Espace disque : avant de cloner, vazy vérifie qu'il reste au moins `RAM de la VM + espaceDisqueMinGo` Go sur le disque de destination (VMware crée pendant l'exécution un fichier de mémoire de la taille de la RAM). Sinon il refuse, sans rien créer.

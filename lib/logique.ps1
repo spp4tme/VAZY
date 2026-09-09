@@ -15,7 +15,7 @@
 # ============================================================================
 
 $script:NomOutil       = 'vazy'
-$script:VersionOutil   = '1.7.0'
+$script:VersionOutil   = '1.8.0'
 $script:VersionCatalogue = 8          # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
@@ -182,6 +182,7 @@ function Get-ConfigParDefaut {
     $c['delaiOutilsSec']    = 120        # attente maximale des outils invité avant de personnaliser (phase 4)
     $c['vncPortMin']        = 5901       # plage de ports réservée à l'affichage distant des VM
     $c['vncPortMax']        = 5999
+    $c['dossierLabos']      = ''         # où sont rangés les fichiers de labo (vide = <données>\labos)
     $h = New-Dictionnaire
     $h['avertissementAffiche'] = $false  # l'avertissement Hyper-V complet a-t-il déjà été montré ?
     $c['hyperv'] = $h
@@ -952,6 +953,64 @@ function Remove-VmParNom {
 }
 
 # ----------------------------------------------------------------------------
+#  Où vivent les fichiers de labo
+#  « vazy lab up tp14 » doit retrouver le TP de la semaine dernière depuis
+#  n'importe quel dossier, y compris une session SSH : les fichiers sont donc
+#  rangés à un endroit fixe, à côté du catalogue.
+# ----------------------------------------------------------------------------
+
+function Get-DossierLabos {
+    if ($script:Config['dossierLabos']) { return [Environment]::ExpandEnvironmentVariables($script:Config['dossierLabos']) }
+    return (Join-Path $script:DossierDonnees 'labos')
+}
+
+# Chemin du fichier d'un labo désigné par un nom court ou par un chemin.
+# Ordre de recherche : le chemin tel quel, le dossier courant, le dossier des
+# labos de vazy. -PourEcriture renvoie où il serait créé s'il n'existe pas.
+function Resolve-CheminLabo {
+    param([Parameter(Mandatory = $true)][string]$Nom, [switch]$PourEcriture)
+    $candidats = New-Object 'System.Collections.Generic.List[string]'
+    $aExtension = ([System.IO.Path]::GetExtension($Nom) -ne '')
+    $aChemin = ($Nom -match '[\\/]' -or $Nom -match '^[A-Za-z]:')
+    try { $candidats.Add($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Nom)) } catch { }
+    if (-not $aExtension) {
+        try { $candidats.Add($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Nom + '.json')) } catch { }
+    }
+    if (-not $aChemin) {
+        $dossier = Get-DossierLabos
+        $candidats.Add((Join-Path $dossier $Nom))
+        if (-not $aExtension) { $candidats.Add((Join-Path $dossier ($Nom + '.json'))) }
+    }
+    foreach ($c in $candidats) { if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
+    if (-not $PourEcriture) { return $null }
+    # Création : un nom court va dans le dossier des labos, un chemin reste où il est.
+    if ($aChemin) { return $candidats[0] }
+    return (Join-Path (Get-DossierLabos) $(if ($aExtension) { $Nom } else { $Nom + '.json' }))
+}
+
+# Nom de labo déduit de ce que l'utilisateur a tapé : « tp14 », « tp14.json »
+# ou « D:\TP\tp14.json » donnent tous « tp14 ».
+function Get-NomLabo {
+    param([Parameter(Mandatory = $true)][string]$Entree)
+    return [System.IO.Path]::GetFileNameWithoutExtension($Entree.TrimEnd('\', '/'))
+}
+
+# Écrit une description de labo (objet ordonné) dans un fichier.
+function Save-DescriptionLabo {
+    param([Parameter(Mandatory = $true)]$Description, [Parameter(Mandatory = $true)][string]$Chemin)
+    $json = ConvertTo-Json -InputObject $Description -Depth 8
+    if (Assert-PasSimulation "écriture du fichier de labo $Chemin") { return $json }
+    try {
+        $dossier = Split-Path -Parent $Chemin
+        if ($dossier -and -not (Test-Path -LiteralPath $dossier)) { New-Item -ItemType Directory -Path $dossier -Force | Out-Null }
+        [System.IO.File]::WriteAllText($Chemin, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        throw (New-ErreurOutil "Impossible d'écrire le fichier de labo $Chemin : $($_.Exception.Message)" "Vérifiez le chemin et vos droits d'écriture.")
+    }
+    return $json
+}
+
+# ----------------------------------------------------------------------------
 #  Fichier de labo (phase 3)
 #  L'interface lit et valide le fichier JSON (Read-FichierLabo) et fournit un
 #  objet Labo : Nom, Fichier, Delai (secondes entre deux démarrages), Machines
@@ -1260,12 +1319,14 @@ function Export-Labo {
         [string]$Prefixe = '',
         [string[]]$Vms = @(),
         [int]$Delai = 5,
-        [switch]$AvecRequis
+        [switch]$AvecRequis,
+        [string[]]$Ordre = @()      # noms courts, dans l'ordre de démarrage voulu
     )
     Connect-Pilote | Out-Null
     $nomLabo = if ($Labo) { $Labo } elseif ($Prefixe) { $Prefixe } else { 'labo' }
     $choisies = @()
     if ($Vms.Count -gt 0) {
+        # Liste explicite : elle peut restreindre un labo à certaines de ses VM.
         foreach ($n in $Vms) { $choisies += (Get-VmDuCatalogue -Nom $n) }
     } else {
         foreach ($n in @($script:Catalogue['vms'].Keys)) {
@@ -1281,11 +1342,21 @@ function Export-Labo {
         throw (New-ErreurOutil "Rien à exporter." ($conseil + "`nUsage : vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c"))
     }
 
+    # L'ordre des machines dans le fichier EST l'ordre de démarrage : on
+    # respecte celui demandé, sinon l'ordre de création, à défaut le nom.
+    $prefixeReel = if ($Labo) { $Labo } else { $Prefixe }
+    $rang = @{}
+    for ($i = 0; $i -lt $Ordre.Count; $i++) { $rang[$Ordre[$i].ToLower()] = $i }
+    $triees = @($choisies | Sort-Object @{ Expression = {
+            $court = $_.Nom
+            if ($prefixeReel -and $court -ilike ($prefixeReel + '-*')) { $court = $court.Substring($prefixeReel.Length + 1) }
+            if ($rang.ContainsKey($court.ToLower())) { $rang[$court.ToLower()] } else { 1000 }
+        } }, @{ Expression = { $_.CreeeLe } }, @{ Expression = { $_.Nom } })
+
     $machines = [ordered]@{}
     $requis = @{}
-    foreach ($vm in ($choisies | Sort-Object Nom)) {
+    foreach ($vm in $triees) {
         $court = $vm.Nom
-        $prefixeReel = if ($Labo) { $Labo } else { $Prefixe }
         if ($prefixeReel -and $court -ilike ($prefixeReel + '-*')) { $court = $court.Substring($prefixeReel.Length + 1) }
         $entree = [ordered]@{ modele = $vm.Modele; ram = $vm.RamGo; cpu = $vm.Cpu }
         $modes = @($vm.Reseau)
@@ -2377,6 +2448,7 @@ function Get-ConfigAffichable {
         'delaiOutilsSec'    = $script:Config['delaiOutilsSec']
         'vncPortMin'        = $script:Config['vncPortMin']
         'vncPortMax'        = $script:Config['vncPortMax']
+        'dossierLabos'      = $(if ($script:Config['dossierLabos']) { $script:Config['dossierLabos'] } else { (Get-DossierLabos) + '  (défaut)' })
     }
 }
 
@@ -2399,6 +2471,10 @@ function Set-ConfigValeur {
                 throw (New-ErreurOutil "Valeur invalide pour espaceDisqueMinGo : $Valeur" 'Indiquez un nombre de Go positif, par exemple 2.')
             }
             $script:Config['espaceDisqueMinGo'] = $n
+        }
+        'dossierlabos' {
+            if ($Valeur) { $Valeur = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Valeur) }
+            $script:Config['dossierLabos'] = $Valeur
         }
         'vncportmin' {
             $n = 0
@@ -2430,7 +2506,7 @@ function Set-ConfigValeur {
             $script:Config['hyperviseur'] = $Valeur.ToLower()
         }
         default {
-            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, vncPortMin, vncPortMax, hyperviseur.')
+            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, dossierLabos, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, vncPortMin, vncPortMax, hyperviseur.')
         }
     }
     Save-Config

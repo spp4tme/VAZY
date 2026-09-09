@@ -107,10 +107,13 @@ USAGE
                                      compte de l'invité (inutile avec un modèle guestinfo)
   vazy gc [--yes]                    supprime les VM éphémères éteintes (fait aussi automatiquement
                                      au début de chaque commande)
-  vazy lab up <fichier.json>         monte un labo entier décrit par un fichier (relançable :
-                                     crée ce qui manque, démarre ce qui est éteint, dans l'ordre)
-  vazy lab status <fichier.json>     état de chaque machine du labo
-  vazy lab down <fichier.json> [--yes] [--stop-only] [--hard]
+  vazy lab up <nom> --vm dc01:win2022:4 --vm client:win11:4 [--save]
+                                     monte un labo décrit en une ligne ; --save garde la recette
+  vazy lab up <nom>                  remonte un labo déjà enregistré (relançable : crée ce qui
+                                     manque, démarre ce qui est éteint, dans l'ordre)
+  vazy lab new <nom>                 assistant : questions une par une, puis écriture du fichier
+  vazy lab status <nom>              état de chaque machine du labo
+  vazy lab down <nom> [--yes] [--stop-only] [--hard]
                                      arrête et supprime tout le labo (--stop-only : arrête sans supprimer)
   vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
                                      génère le fichier de labo qui recréerait des VM existantes
@@ -144,6 +147,9 @@ OPTIONS DE CRÉATION (toutes facultatives)
   --vnc [off]        écran de la VM accessible à distance : vazy choisit un port libre, tire
                      un mot de passe, et affiche un lien vnc:// à appuyer depuis le téléphone
 
+Les options ci-dessus s'appliquent aussi à « vazy lab up <nom> --vm ... » : elles valent alors
+pour toutes les machines du labo (--mode, --vnc, --cpu, --nogui, --set, --delai...).
+
 EXEMPLES
   vazy ubuntu-server
   vazy ubuntu-server --tmp           je teste un truc, j'éteins, il ne reste rien
@@ -152,7 +158,8 @@ EXEMPLES
   vazy ubuntu-server --set svga.autodetect=FALSE --set usb.present=TRUE
   vazy reset TP14                    le TP est cassé : retour à l'état neuf en quelques secondes
   vazy snap TP14 avant-dhcp          jalon, puis plus tard : vazy back TP14 avant-dhcp
-  vazy lab up tp14-ad.json           un fichier décrit le TP entier (voir README, « Fichier de labo »)
+  vazy lab up tp14 --vm dc01:win2022:4 --vm client:win11:4 --save
+  vazy lab up tp14                   la semaine suivante : une seule commande
   vazy template mark ubuntu-server --guestinfo   puis   vazy ubuntu-server --hostname web1
   vazy ubuntu-server --dry-run       montre ce qui serait fait, sans rien faire
   vazy lab export tp14.json --prefixe tp14 --requis
@@ -184,14 +191,15 @@ function New-ErreurUsage {
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
     $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os',
-                           'labo', 'prefixe', 'vms', 'delai')
+                           'labo', 'prefixe', 'vms', 'delai', 'vm')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
-                           'dry-run', 'requis', 'tout')
+                           'dry-run', 'requis', 'tout', 'save')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
         Options      = @{}
         Sets         = New-Object 'System.Collections.Generic.List[object]'
+        Vms          = New-Object 'System.Collections.Generic.List[string]'   # --vm nom:modele:ram, répétable
     }
     $i = 0
     while ($i -lt $Jetons.Count) {
@@ -228,6 +236,8 @@ function ConvertFrom-Arguments {
                 }
                 if ($nom -eq 'set') {
                     $resultat.Sets.Add((ConvertTo-ReglageBrut -Texte $valeur))
+                } elseif ($nom -eq 'vm') {
+                    $resultat.Vms.Add($valeur)
                 } elseif ($nom -eq 'mode' -and $resultat.Options.ContainsKey('mode')) {
                     # --mode répétable : un mode par carte, dans l'ordre (équivaut à --mode a,b)
                     $resultat.Options['mode'] = $resultat.Options['mode'] + ',' + $valeur
@@ -465,6 +475,53 @@ function Read-FichierLabo {
         }
     }
     return [pscustomobject]@{ Nom = $nom; Fichier = $fichier; Delai = $delai; Machines = @($machines); Requis = @($requis) }
+}
+
+# Construit une description de labo à partir des « --vm nom:modele:ram » et des
+# options générales de la ligne de commande, sans passer par un fichier. Même
+# forme que Read-FichierLabo : la logique ne voit pas la différence.
+function ConvertTo-DescriptionLabo {
+    param($Analyse, [string]$NomLabo, [string]$Fichier)
+    $o = $Analyse.Options
+    if (@($Analyse.Vms).Count -eq 0) { throw (New-ErreurUsage 'Aucune machine : ajoutez au moins un --vm nom:modele[:ram[:cpu]]') }
+    # Options générales : elles s'appliquent à toutes les machines du labo.
+    $ramDefaut = if ($o.ContainsKey('ram')) { ConvertTo-RamGo -Texte $o['ram'] } else { 2 }
+    $cpuDefaut = if ($o.ContainsKey('cpu')) { ConvertTo-Entier -Texte $o['cpu'] -Option 'cpu' -Min 1 -Max 64 } else { 2 }
+    $modes = ConvertTo-ListeModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) `
+                                  -ReseauTexte $(if ($o.ContainsKey('reseau')) { $o['reseau'] } else { $null })
+    $brut = $Analyse.Sets.ToArray()
+    $vnc = Test-OptionActivee -Analyse $Analyse -Nom 'vnc'
+    $sansInterface = $o.ContainsKey('nogui')
+    $sansDemarrage = $o.ContainsKey('nostart')
+    $delai = if ($o.ContainsKey('delai')) { ConvertTo-Entier -Texte $o['delai'] -Option 'delai' -Min 0 -Max 600 } else { 5 }
+
+    $machines = @()
+    $vus = @{}
+    foreach ($spec in $Analyse.Vms) {
+        $morceaux = @(([string]$spec) -split ':')
+        if ($morceaux.Count -lt 2 -or -not $morceaux[0].Trim() -or -not $morceaux[1].Trim()) {
+            throw (New-ErreurUsage "--vm attend nom:modele[:ram[:cpu]] (reçu : « $spec »). Exemple : --vm dc01:win2022:4")
+        }
+        if ($morceaux.Count -gt 4) { throw (New-ErreurUsage "--vm accepte au plus nom:modele:ram:cpu (reçu : « $spec »).") }
+        $nomMachine = $morceaux[0].Trim()
+        if ($nomMachine -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
+            throw (New-ErreurUsage "Nom de machine invalide : « $nomMachine » (lettres, chiffres, points, tirets, underscores, 32 caractères max).")
+        }
+        if ($vus.ContainsKey($nomMachine.ToLower())) { throw (New-ErreurUsage "La machine « $nomMachine » est déclarée deux fois.") }
+        $vus[$nomMachine.ToLower()] = $true
+        $ram = if ($morceaux.Count -ge 3 -and $morceaux[2].Trim()) { ConvertTo-RamGo -Texte $morceaux[2] } else { $ramDefaut }
+        $cpu = if ($morceaux.Count -ge 4 -and $morceaux[3].Trim()) { ConvertTo-Entier -Texte $morceaux[3] -Option 'cpu' -Min 1 -Max 64 } else { $cpuDefaut }
+        # Le nom de la machine sert de nom d'hôte, comme dans un fichier de labo.
+        $nomHote = $nomMachine
+        if (Test-NomHote -NomHote $nomHote) { $nomHote = '' }
+        $machines += [pscustomobject]@{
+            Nom = $nomMachine; Modele = $morceaux[1].Trim(); RamGo = $ram; Cpu = $cpu; Modes = @($modes); Brut = @($brut)
+            SansInterface = $sansInterface; SansDemarrage = $sansDemarrage; Apres = @(); NomHote = $nomHote; Vnc = $vnc
+        }
+    }
+    # Sans dépendance déclarée, les machines démarrent dans l'ordre où elles
+    # ont été écrites sur la ligne de commande, avec le délai entre chacune.
+    return [pscustomobject]@{ Nom = $NomLabo; Fichier = $Fichier; Delai = $delai; Machines = @($machines); Requis = @() }
 }
 
 function Assert-AucunArgumentEnTrop {
@@ -906,26 +963,62 @@ function Invoke-CommandeFreeze {
 
 function Invoke-CommandeLab {
     param($Analyse)
-    $usage = 'Usage : vazy lab up <fichier.json> | vazy lab status <fichier.json> | vazy lab down <fichier.json> [--yes] [--stop-only] [--hard] | vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c'
+    $usage = @'
+Usage : vazy lab up <nom|fichier.json> [--vm nom:modele[:ram[:cpu]]] ... [--save]
+        vazy lab new <nom>                    assistant : questions, puis écriture du fichier
+        vazy lab status <nom|fichier.json>
+        vazy lab down <nom|fichier.json> [--yes] [--stop-only] [--hard]
+        vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
+'@
     if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage $usage) }
     Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
     $sousCommande = $Analyse.Positionnels[1].ToLower()
-    if ($sousCommande -notin 'up', 'status', 'down', 'export') { throw (New-ErreurUsage $usage) }
+    if ($sousCommande -notin 'up', 'status', 'down', 'export', 'new') { throw (New-ErreurUsage $usage) }
     if ($sousCommande -eq 'export') { Invoke-CommandeLabExport -Analyse $Analyse; return }
-    $labo = Read-FichierLabo -Chemin $Analyse.Positionnels[2]
+    if ($sousCommande -eq 'new')    { Invoke-CommandeLabNew    -Analyse $Analyse; return }
+
+    $entree = $Analyse.Positionnels[2]
+    $enLigne = (@($Analyse.Vms).Count -gt 0)
+    if ($enLigne -and $sousCommande -ne 'up') {
+        throw (New-ErreurUsage "--vm ne s'utilise qu'avec « vazy lab up ». Pour $sousCommande, indiquez le nom du labo ou son fichier.")
+    }
+    if ($enLigne) {
+        # Labo décrit sur la ligne de commande : aucun fichier n'est lu.
+        $nomLabo = Get-NomLabo -Entree $entree
+        $fichier = Resolve-CheminLabo -Nom $entree -PourEcriture
+        $labo = ConvertTo-DescriptionLabo -Analyse $Analyse -NomLabo $nomLabo -Fichier $fichier
+    } else {
+        $chemin = Resolve-CheminLabo -Nom $entree
+        if (-not $chemin) {
+            $dossier = Get-DossierLabos
+            $connus = @()
+            if (Test-Path -LiteralPath $dossier) { $connus = @(Get-ChildItem -LiteralPath $dossier -Filter '*.json' -File | ForEach-Object { $_.BaseName }) }
+            $liste = if ($connus.Count -gt 0) { "Labos enregistrés : " + ($connus -join ', ') + '.' } else { "Aucun labo enregistré dans $dossier." }
+            throw (New-ErreurOutil "Labo inconnu : « $entree »." `
+                ("$liste`n" +
+                 "Pour le décrire en une ligne et le garder : vazy lab up $entree --vm dc01:<modele>:4 --vm client:<modele>:4 --save`n" +
+                 "Pour être guidé par des questions : vazy lab new $entree"))
+        }
+        $labo = Read-FichierLabo -Chemin $chemin
+    }
+
     switch ($sousCommande) {
         'up' {
-            Write-Host ("vazy : montage du labo « {0} » ({1})" -f $labo.Nom, $labo.Fichier) -ForegroundColor White
+            Write-Host ("vazy : montage du labo « {0} » ({1})" -f $labo.Nom, $(if ($enLigne) { 'décrit sur la ligne de commande' } else { $labo.Fichier })) -ForegroundColor White
             $r = Invoke-LaboUp -Labo $labo
             Write-Host ''
             if (Test-Simulation) {
                 Write-Host ('Simulation terminée : {0} VM auraient été créées et {1} démarrées. Rien n''a été fait.' -f $r.Creees, $r.Demarrees) -ForegroundColor Magenta
-                Write-Host ('  Pour le faire vraiment : vazy lab up {0}' -f $Analyse.Positionnels[2]) -ForegroundColor Gray
+                Write-Host ('  Pour le faire vraiment : vazy lab up {0}' -f $entree) -ForegroundColor Gray
                 return
             }
             Write-Host ('Labo « {0} » monté en {1} : {2} VM créée(s), {3} démarrée(s).' -f $r.Nom, ('{0:0.0} s' -f $r.Duree), $r.Creees, $r.Demarrees) -ForegroundColor Green
             Write-TableauLabo -Lignes @(Get-StatutLabo -Labo $labo)
-            Write-Host ('  démonter : vazy lab down {0}     arrêter seulement : vazy lab down {0} --stop-only' -f $Analyse.Positionnels[2]) -ForegroundColor Gray
+            if ($Analyse.Options.ContainsKey('save')) { Save-LaboApresMontage -Labo $labo -Analyse $Analyse }
+            elseif ($enLigne) {
+                Write-Host ('  Pour rejouer ce labo la semaine prochaine, gardez-le : ajoutez --save à la commande.') -ForegroundColor Gray
+            }
+            Write-Host ('  démonter : vazy lab down {0}     arrêter seulement : vazy lab down {0} --stop-only' -f $labo.Nom) -ForegroundColor Gray
         }
         'status' {
             Write-Host ("Labo « {0} » ({1})" -f $labo.Nom, $labo.Fichier) -ForegroundColor White
@@ -950,6 +1043,154 @@ function Invoke-CommandeLab {
             if ($stopSeulement) { Write-Host ('Labo « {0} » arrêté : {1} VM arrêtée(s), {2} conservée(s).' -f $r.Nom, $r.Arretees, $r.Total) -ForegroundColor Green }
             else { Write-Host ('Labo « {0} » démonté : {1} VM supprimée(s).' -f $r.Nom, $r.Supprimees) -ForegroundColor Green }
         }
+    }
+}
+
+# --save : le labo vient d'être monté, on en garde la recette. Le fichier est
+# construit à partir des VM réellement créées, jamais saisi à la main.
+function Save-LaboApresMontage {
+    param($Labo, $Analyse)
+    $destination = $Labo.Fichier
+    if (-not $destination) { $destination = Resolve-CheminLabo -Nom $Labo.Nom -PourEcriture }
+    if ((Test-Path -LiteralPath $destination) -and -not $Analyse.Options.ContainsKey('yes')) {
+        Write-Host ''
+        Write-Host ('Le fichier de labo {0} existe déjà et va être remplacé par la description des VM qui viennent d''être montées.' -f $destination) -ForegroundColor Yellow
+        if (-not (Read-Confirmation -Question 'Confirmer ?')) {
+            Write-Host '  Labo non enregistré ; les VM restent en place.' -ForegroundColor Gray
+            return
+        }
+    }
+    try {
+        # Seules les machines de cette commande, dans l'ordre où elles ont été
+        # écrites : le fichier doit décrire ce qui a été demandé, ni plus ni moins.
+        $noms = @($Labo.Machines | ForEach-Object { '{0}-{1}' -f $Labo.Nom, $_.Nom })
+        $ordre = @($Labo.Machines | ForEach-Object { $_.Nom })
+        $export = Export-Labo -Labo $Labo.Nom -Vms $noms -Delai $Labo.Delai -AvecRequis -Ordre $ordre
+        Save-DescriptionLabo -Description $export.Description -Chemin $destination | Out-Null
+        $autres = @(Get-StatutLabo -Labo $Labo | Where-Object { -not $_.DansFichier -and $_.Etat -ne 'à créer' })
+        if ($autres.Count -gt 0) {
+            Write-MessageOutil -Type 'attention' -Message ("{0} VM rattachée(s) au labo « {1} » ne sont pas dans cette commande et n'ont pas été enregistrées : {2}. Elles restent en place ; « vazy lab down {1} » les démontera aussi." -f $autres.Count, $Labo.Nom, (($autres | ForEach-Object { $_.Vm }) -join ', '))
+        }
+        Write-Host ''
+        Write-Host ('Labo enregistré dans {0}.' -f $destination) -ForegroundColor Green
+        Write-Host ('  La semaine prochaine, une seule commande suffira : vazy lab up {0}' -f $Labo.Nom) -ForegroundColor Gray
+    } catch {
+        Write-MessageOutil -Type 'attention' -Message ("Labo monté, mais son enregistrement a échoué : {0} {1}" -f $_.Exception.Message, [string]$_.Exception.Data['Conseil'])
+    }
+}
+
+# Assistant : pour un labo compliqué, ou quand on ne connaît pas les options.
+# Pose les questions une par une, puis écrit le fichier. Ne monte rien.
+function Invoke-CommandeLabNew {
+    param($Analyse)
+    if (-not (Test-ConsoleInteractive)) {
+        throw (New-ErreurOutil "L'assistant a besoin d'un terminal : la console n'est pas interactive." `
+            "Lancez « vazy lab new <nom> » dans un terminal, ou décrivez le labo en une ligne : vazy lab up <nom> --vm dc01:<modele>:4 --save")
+    }
+    $nomLabo = Get-NomLabo -Entree $Analyse.Positionnels[2]
+    Test-NomValide -Nom $nomLabo -Role 'nom de labo'
+    $destination = Resolve-CheminLabo -Nom $nomLabo -PourEcriture
+    if (Test-Path -LiteralPath $destination) {
+        Write-Host ('Le fichier {0} existe déjà et va être remplacé.' -f $destination) -ForegroundColor Yellow
+        if (-not (Read-Confirmation -Question 'Confirmer ?')) { Write-Host 'Annulé.' -ForegroundColor Gray; return }
+    }
+    $modeles = @(Get-ListeModeles)
+    if ($modeles.Count -eq 0) {
+        throw (New-ErreurOutil "Aucun modèle enregistré : il n'y a rien à mettre dans un labo." "Préparez un modèle (README, « Préparer un modèle ») puis : vazy template add <chemin de la VM>")
+    }
+
+    Write-Host ("Assistant : nouveau labo « {0} »" -f $nomLabo) -ForegroundColor White
+    Write-Host '  Entrée pour accepter la valeur entre crochets. Ctrl+C pour abandonner.' -ForegroundColor Gray
+    Write-Host ''
+    Write-Host '  Modèles disponibles :' -ForegroundColor Gray
+    for ($i = 0; $i -lt $modeles.Count; $i++) {
+        Write-Host ('    {0}. {1,-20} {2}' -f ($i + 1), $modeles[$i].Alias, $modeles[$i].Os) -ForegroundColor Gray
+    }
+    Write-Host ''
+
+    $nombre = Read-Reponse -Question 'Combien de machines' -Defaut '2' -Validation {
+        param($v) $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 20) { return $null }; return 'Indiquez un nombre entre 1 et 20.'
+    }
+    $nombre = [int]$nombre
+    $delai = [int](Read-Reponse -Question 'Secondes d''attente entre deux démarrages' -Defaut '5' -Validation {
+        param($v) $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 600) { return $null }; return 'Indiquez un nombre de secondes entre 0 et 600.'
+    })
+
+    $machines = [ordered]@{}
+    $precedente = ''
+    for ($i = 1; $i -le $nombre; $i++) {
+        Write-Host ''
+        Write-Host ("  Machine $i sur $nombre") -ForegroundColor Cyan
+        $nomMachine = Read-Reponse -Question '  Nom' -Defaut ('vm' + $i) -Validation {
+            param($v)
+            if ($v -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') { return 'Lettres, chiffres, points, tirets et underscores, 32 caractères max.' }
+            if ($machines.Contains($v)) { return 'Ce nom est déjà pris dans ce labo.' }
+            return $null
+        }
+        $choix = Read-Reponse -Question ('  Modèle (numéro ou nom)') -Defaut $modeles[0].Alias -Validation {
+            param($v)
+            $n = 0
+            if ([int]::TryParse($v, [ref]$n)) { if ($n -ge 1 -and $n -le $modeles.Count) { return $null }; return "Numéro entre 1 et $($modeles.Count)." }
+            foreach ($m in $modeles) { if ($m.Alias -ieq $v) { return $null } }
+            return 'Modèle inconnu : ' + (@($modeles | ForEach-Object { $_.Alias }) -join ', ')
+        }
+        $n = 0
+        $modele = if ([int]::TryParse($choix, [ref]$n)) { $modeles[$n - 1].Alias } else { $choix }
+        $ram = Read-Reponse -Question '  RAM en Go' -Defaut '2' -Validation {
+            param($v) try { ConvertTo-RamGo -Texte $v | Out-Null; return $null } catch { return $_.Exception.Message }
+        }
+        $cpu = Read-Reponse -Question '  Cœurs' -Defaut '2' -Validation {
+            param($v) $n = 0; if ([int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 64) { return $null }; return 'Indiquez un nombre entre 1 et 64.'
+        }
+        $mode = Read-Reponse -Question '  Réseau (nat, bridged, hostonly ; séparés par une virgule pour plusieurs cartes)' -Defaut 'nat' -Validation {
+            param($v) try { ConvertTo-ListeModes -ModeTexte $v -ReseauTexte $null | Out-Null; return $null } catch { return $_.Exception.Message }
+        }
+        $ecran = Read-Reponse -Question '  Écran accessible à distance' -Defaut 'non' -Validation {
+            param($v) if ($v.ToLower() -in 'o', 'oui', 'n', 'non', 'y', 'yes', 'no') { return $null }; return 'Répondez oui ou non.'
+        }
+        $apres = ''
+        if ($precedente) {
+            $reponse = Read-Reponse -Question ("  Démarrer après « $precedente »") -Defaut 'oui' -Validation {
+                param($v) if ($v.ToLower() -in 'o', 'oui', 'n', 'non', 'y', 'yes', 'no') { return $null }; return 'Répondez oui ou non.'
+            }
+            if ($reponse.ToLower() -in 'o', 'oui', 'y', 'yes') { $apres = $precedente }
+        }
+
+        $entree = [ordered]@{ modele = $modele; ram = (ConvertTo-RamGo -Texte $ram); cpu = [int]$cpu }
+        $modes = @(ConvertTo-ListeModes -ModeTexte $mode -ReseauTexte $null)
+        if ($modes.Count -eq 1) { $entree['mode'] = $modes[0] } else { $entree['mode'] = $modes }
+        if ($apres) { $entree['apres'] = $apres }
+        if ($ecran.ToLower() -in 'o', 'oui', 'y', 'yes') { $entree['vnc'] = $true }
+        $machines[$nomMachine] = $entree
+        $precedente = $nomMachine
+    }
+
+    $description = [ordered]@{ labo = $nomLabo; delai = $delai; machines = $machines }
+    $json = Save-DescriptionLabo -Description $description -Chemin $destination
+    Write-Host ''
+    Write-Host $json
+    Write-Host ''
+    Write-Host ('Labo « {0} » enregistré dans {1}.' -f $nomLabo, $destination) -ForegroundColor Green
+    Write-Host ('  Le monter : vazy lab up {0}' -f $nomLabo) -ForegroundColor Gray
+}
+
+# Question fermée avec valeur par défaut et validation. Redemande tant que la
+# réponse ne convient pas.
+function Read-Reponse {
+    param([string]$Question, [string]$Defaut = '', [scriptblock]$Validation = $null)
+    while ($true) {
+        $invite = if ($Defaut) { "$Question [$Defaut]" } else { $Question }
+        $reponse = $null
+        try { $reponse = Read-Host $invite } catch { }
+        if ($null -eq $reponse) { throw (New-ErreurOutil "Saisie interrompue." "Relancez l'assistant, ou décrivez le labo en une ligne avec --vm.") }
+        $reponse = ([string]$reponse).Trim()
+        if (-not $reponse) { $reponse = $Defaut }
+        if (-not $reponse) { Write-Host '    Une réponse est nécessaire.' -ForegroundColor Yellow; continue }
+        if ($Validation) {
+            $probleme = & $Validation $reponse
+            if ($probleme) { Write-Host ('    ' + $probleme) -ForegroundColor Yellow; continue }
+        }
+        return $reponse
     }
 }
 
