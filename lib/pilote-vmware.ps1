@@ -59,6 +59,11 @@
 #                                                identifiants) ; renvoie son code de sortie ;
 #                                                le mot de passe n'apparaît dans aucun message
 #
+#  Affichage distant (écran de la VM vu depuis un autre appareil) :
+#    Set-MachineAffichageDistant -Machine -Actif [-Port] [-MotDePasse]
+#                                                active ou retire le serveur d'affichage
+#                                                distant (machine éteinte : relu au démarrage)
+#
 #  Protection du modèle et autonomie :
 #    Get-MachineEmpreinte      -Machine          -> disques de base (nom -> taille, date)
 #    Test-MachineEmpreinte     -Machine -Empreinte
@@ -288,7 +293,9 @@ function Set-ValeurVmx {
     $ligne = $Cle + ' = "' + $v + '"'
     $i = Get-IndexCleVmx -Vmx $Vmx -Cle $Cle
     if ($i -ge 0) { if ($Vmx.Lignes[$i] -ceq $ligne) { return }; $Vmx.Lignes[$i] = $ligne } else { $Vmx.Lignes.Add($ligne) }
-    $Vmx.Changements.Add($ligne)
+    # Un secret ne va jamais au journal ni à l'écran : seule la clé est tracée.
+    if ($Cle -match '(?i)password|passwd|\.key$|secret') { $Vmx.Changements.Add($Cle + ' = "***"') }
+    else { $Vmx.Changements.Add($ligne) }
 }
 
 # Supprime toutes les lignes dont la clé correspond à l'expression régulière.
@@ -713,6 +720,37 @@ function Invoke-MachineScript {
         "Ouvrez la VM dans VMware Workstation pour voir ce qui se passe dans l'invité."
     }
     throw (New-ErreurPilote "Exécution dans l'invité impossible après $Tentatives tentatives : $message" $conseil)
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat du pilote : affichage distant
+# ----------------------------------------------------------------------------
+
+# Active ou retire le serveur d'affichage distant intégré à l'hyperviseur.
+# VMware Workstation Pro embarque un serveur VNC, piloté par trois lignes du
+# .vmx : il n'y a donc rien à installer. Les lignes sont lues au démarrage de
+# la machine : poser cela sur une machine en marche n'a d'effet qu'au
+# démarrage suivant (l'appelant en avertit l'utilisateur).
+# Le mot de passe est écrit en clair dans le .vmx, comme VMware l'attend ; il
+# n'apparaît ni au journal ni dans les messages (voir Set-ValeurVmx).
+function Set-MachineAffichageDistant {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][bool]$Actif,
+        [int]$Port = 0,
+        [string]$MotDePasse = ''
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation "activer l'affichage distant de"
+    $vmx = Read-FichierVmx -Chemin $Machine
+    if ($Actif) {
+        if ($Port -le 0) { throw (New-ErreurPilote "Port d'affichage distant invalide : $Port" 'Indiquez un port TCP entre 1 et 65535.') }
+        Set-ValeurVmx -Vmx $vmx -Cle 'RemoteDisplay.vnc.enabled'  -Valeur 'TRUE'
+        Set-ValeurVmx -Vmx $vmx -Cle 'RemoteDisplay.vnc.port'     -Valeur ([string]$Port)
+        if ($MotDePasse) { Set-ValeurVmx -Vmx $vmx -Cle 'RemoteDisplay.vnc.password' -Valeur $MotDePasse }
+    } else {
+        Remove-ClesVmx -Vmx $vmx -MotifCle 'RemoteDisplay\.vnc\..*'
+    }
+    Write-FichierVmx -Vmx $vmx
 }
 
 # ----------------------------------------------------------------------------

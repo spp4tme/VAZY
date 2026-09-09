@@ -15,8 +15,8 @@
 # ============================================================================
 
 $script:NomOutil       = 'vazy'
-$script:VersionOutil   = '1.6.0'
-$script:VersionCatalogue = 7          # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionOutil   = '1.7.0'
+$script:VersionCatalogue = 8          # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -34,7 +34,7 @@ $script:RappelHyperVFait = $false   # le rappel court Hyper-V a-t-il déjà ét�
 $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins courts (chargée à la demande)
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
-                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze')
+                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -180,6 +180,8 @@ function Get-ConfigParDefaut {
     $c['dossierVms']        = ''         # dossier où créer les VM (vide = à côté du modèle)
     $c['espaceDisqueMinGo'] = 1          # marge d'espace libre exigée, en plus de la RAM de la VM
     $c['delaiOutilsSec']    = 120        # attente maximale des outils invité avant de personnaliser (phase 4)
+    $c['vncPortMin']        = 5901       # plage de ports réservée à l'affichage distant des VM
+    $c['vncPortMax']        = 5999
     $h = New-Dictionnaire
     $h['avertissementAffiche'] = $false  # l'avertissement Hyper-V complet a-t-il déjà été montré ?
     $c['hyperv'] = $h
@@ -239,6 +241,8 @@ function Save-Config {
 #               + vms.<nom>.autonome (clone complet après « vazy freeze »)
 #               + modeles.<alias>.alias (noms standards de ce modèle, pour les
 #                 prérequis d'un labo partagé : « vazy template alias »)
+#   version 8 : + vms.<nom>.vnc { actif, port, motDePasse } : affichage distant
+#                 de l'écran de la VM (voir la section « écran à distance »)
 #   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
 #   migration destructive.
 function Read-Catalogue {
@@ -273,6 +277,12 @@ function Read-Catalogue {
         }
         if ($vm -is [System.Collections.IDictionary] -and $vm.Contains('nomHoteApplique')) {
             $vm.Remove('nomHoteApplique')   # v6 : la réapplication après reset/back n'existe plus
+            $modifie = $true
+        }
+        if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('vnc')) {
+            $v = New-Dictionnaire
+            $v['actif'] = $false; $v['port'] = 0; $v['motDePasse'] = ''
+            $vm['vnc'] = $v          # VM d'avant la v8 : pas d'affichage distant
             $modifie = $true
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('empreinte')) {
@@ -486,6 +496,15 @@ function Test-EspaceDisque {
     return $libre
 }
 
+# La VM du catalogue tourne-t-elle ? (nom, pas chemin)
+function Test-VmEnMarche {
+    param([string]$Nom)
+    try {
+        $vm = Get-VmDuCatalogue -Nom $Nom
+        return (Test-MachineEnCours -Chemin $vm.Chemin)
+    } catch { return $false }
+}
+
 function Test-MachineEnCours {
     param([string]$Chemin)
     $enCours = @(Get-MachineEnCours)
@@ -542,6 +561,9 @@ function Get-VmDuCatalogue {
             Empreinte = $vm['empreinte']
             Sets = @($vm['sets'])
             Autonome = ($vm['autonome'] -eq $true)
+            Vnc = $vm['vnc']
+            VncActif = ($vm['vnc'] -and $vm['vnc']['actif'] -eq $true)
+            VncPort = [int]$(if ($vm['vnc']) { $vm['vnc']['port'] } else { 0 })
         }
     }
     if ($script:Catalogue['modeles'].Contains($Nom)) {
@@ -569,7 +591,8 @@ function New-VmDepuisModele {
         [switch]$SansDemarrage,
         [switch]$Ephemere,              # --tmp : VM jetable, supprimée dès qu'elle est trouvée éteinte
         [string]$Labo = '',             # nom du labo propriétaire (vazy lab up), vide sinon
-        [string]$NomHote = ''           # nom d'hôte à appliquer dans l'invité après démarrage (phase 4), vide = rien
+        [string]$NomHote = '',          # nom d'hôte à appliquer dans l'invité après démarrage (phase 4), vide = rien
+        [switch]$Vnc                    # --vnc : écran de la VM accessible à distance
     )
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     if ($Ephemere -and $SansDemarrage) {
@@ -706,8 +729,19 @@ function New-VmDepuisModele {
     $fiche['empreinte'] = Get-MachineEmpreinte -Machine $infosModele['chemin']
     $fiche['sets']      = @($Brut | ForEach-Object { '{0}={1}' -f $_.Cle, $_.Valeur })   # pour « vazy lab export »
     $fiche['autonome']  = $false
+    $vncFiche = New-Dictionnaire
+    $vncFiche['actif'] = $false; $vncFiche['port'] = 0; $vncFiche['motDePasse'] = ''
+    $fiche['vnc'] = $vncFiche
     $script:Catalogue['vms'][$Nom] = $fiche
     Save-Catalogue
+
+    # Écran distant : écrit avant le démarrage, car la machine relit sa
+    # configuration à ce moment-là.
+    $lienVnc = $null
+    if ($Vnc) {
+        try { $lienVnc = Enable-AffichageDistant -Nom $Nom }
+        catch { Publish-Message 'attention' ("écran distant non activé : {0} {1}" -f $_.Exception.Message, [string]$_.Exception.Data['Conseil']) }
+    }
 
     # --- Étape 6 : démarrage (avec dépôt de la personnalisation) -------------
     if (-not $SansDemarrage) {
@@ -739,6 +773,7 @@ function New-VmDepuisModele {
         Dossier  = $dossierVm
         Demarree = (-not $SansDemarrage)
         Ephemere = [bool]$Ephemere
+        Vnc      = $lienVnc
         Duree    = $chrono.Elapsed.TotalSeconds
     }
 }
@@ -772,6 +807,7 @@ function Get-ListeVms {
             Chemin   = $vm['chemin']
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo     = [string]$vm['labo']
+            VncPort  = [int]$(if ($vm['vnc'] -and $vm['vnc']['actif'] -eq $true) { $vm['vnc']['port'] } else { 0 })
         }
     }
     return $liste   # l'appelant entoure de @() : vide -> tableau vide
@@ -1129,7 +1165,7 @@ function Invoke-LaboUp {
         $n++
         $nomVm = Get-NomVmLabo -Labo $Labo -Machine $m.Nom
         Publish-Message 'etape' ("Création {0}/{1} : {2} -> VM « {3} »" -f $n, $aCreer.Count, $m.Nom, $nomVm)
-        New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote | Out-Null
+        New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote -Vnc:$m.Vnc | Out-Null
     }
 
     # --- Démarrage dans l'ordre des dépendances -----------------------------
@@ -1258,6 +1294,7 @@ function Export-Labo {
         else { $entree['mode'] = $modes }
         if ($vm.NomHote -and $vm.NomHote -ine $court) { $entree['hostname'] = $vm.NomHote }
         elseif (-not $vm.NomHote) { $entree['hostname'] = $false }
+        if ($vm.VncActif) { $entree['vnc'] = $true }
         $sets = @($vm.Sets)
         if ($sets.Count -gt 0) {
             $objet = [ordered]@{}
@@ -1435,7 +1472,22 @@ function Invoke-Doctor {
             }
         }
         if ($vm.Ephemere) { $messages += 'éphémère' }
+        if ($vm.VncActif) {
+            # Un port pris par un autre programme empêche la VM de démarrer.
+            $messages += ("écran distant sur le port {0}" -f $vm.VncPort)
+            $occupePar = @()
+            foreach ($autre in @($script:Catalogue['vms'].Keys)) {
+                if ($autre -ieq $nom) { continue }
+                $v = $script:Catalogue['vms'][$autre]['vnc']
+                if ($v -and $v['actif'] -eq $true -and [int]$v['port'] -eq $vm.VncPort) { $occupePar += $autre }
+            }
+            if ($occupePar.Count -gt 0) {
+                $etat = 'erreur'
+                $messages += ("port partagé avec : " + ($occupePar -join ', ') + " (ces VM ne peuvent pas tourner ensemble)")
+            }
+        }
         $conseil = ''
+        if ($messages -join ' ' -match 'port partagé') { $conseil = "Réattribuez un port : vazy vnc $nom off puis vazy vnc $nom" }
         if ($etat -eq 'erreur') { $conseil = "Le modèle a changé ou disparu : cette VM ne peut plus démarrer. Restaurez le modèle, ou supprimez la VM (vazy rm $nom). Pour l'avenir : vazy freeze <nom> rend une VM importante autonome." }
         elseif ($messages -contains "point de retour « $($vm.InstantaneNeuf) » absent") { $conseil = "Pour le recréer, VM éteinte : vazy stop $nom ; vazy snap $nom $($script:InstantaneNeuf)" }
         Ajouter 'VM' $etat $nom ($messages -join ' ; ') $conseil
@@ -1465,6 +1517,169 @@ function Invoke-Doctor {
     }
 
     return $constats.ToArray()
+}
+
+# ----------------------------------------------------------------------------
+#  Écran de la VM à distance (téléphone, autre poste)
+#  VMware Workstation Pro embarque un serveur VNC, activé par trois lignes du
+#  .vmx : rien à installer. vazy choisit un port libre dans une plage réservée,
+#  tire un mot de passe au hasard, et affiche un lien vnc:// prêt à ouvrir.
+#  Le protocole VNC limite le mot de passe à 8 caractères et ne chiffre rien :
+#  ce port ne doit jamais être exposé à internet (voir README).
+# ----------------------------------------------------------------------------
+
+# Mot de passe VNC : exactement 8 caractères (limite du protocole), tirés au
+# sort dans un alphabet sans caractère ambigu ni caractère qui casserait le
+# lien vnc:// (pas de @ : / ? # % &).
+function New-MotDePasseVnc {
+    $alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $octets = New-Object byte[] 8
+    $tirage = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $tirage.GetBytes($octets) } finally { $tirage.Dispose() }
+    $texte = ''
+    foreach ($o in $octets) { $texte += $alphabet[$o % $alphabet.Length] }
+    return $texte
+}
+
+# Ports TCP en écoute sur cette machine : un port déjà pris par un autre
+# programme ferait échouer le démarrage de la VM sans message clair.
+function Get-PortsEcoutes {
+    try {
+        $proprietes = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+        return @($proprietes.GetActiveTcpListeners() | ForEach-Object { $_.Port })
+    } catch {
+        Publish-Message 'attention' "Impossible de lister les ports en écoute ($($_.Exception.Message)) : vazy ne peut pas vérifier que le port choisi est libre."
+        return @()
+    }
+}
+
+# Premier port libre de la plage réservée : ni attribué à une autre VM du
+# catalogue, ni en écoute sur la machine.
+function Get-PortVncLibre {
+    param([string]$Sauf = '')
+    $min = [int]$script:Config['vncPortMin']
+    $max = [int]$script:Config['vncPortMax']
+    $pris = @{}
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        if ($Sauf -and $nom -ieq $Sauf) { continue }
+        $vnc = $script:Catalogue['vms'][$nom]['vnc']
+        if ($vnc -and $vnc['actif'] -eq $true -and [int]$vnc['port'] -gt 0) { $pris[[int]$vnc['port']] = $nom }
+    }
+    $ecoutes = @{}
+    foreach ($p in (Get-PortsEcoutes)) { $ecoutes[[int]$p] = $true }
+    for ($port = $min; $port -le $max; $port++) {
+        if ($pris.ContainsKey($port)) { continue }
+        if ($ecoutes.ContainsKey($port)) { continue }
+        return $port
+    }
+    throw (New-ErreurOutil "Aucun port libre entre $min et $max pour l'affichage distant." `
+        ("Chaque VM avec écran distant occupe un port. Retirez-le d'une VM qui n'en a plus besoin (vazy vnc <nom> off), ou élargissez la plage : vazy config vncPortMax " + ($max + 100)))
+}
+
+# Adresse à donner au client VNC. Priorité à Tailscale : c'est la seule qui
+# fonctionne aussi bien depuis le réseau local que depuis l'extérieur, sans
+# ouvrir de port sur la box. Sinon l'adresse du réseau local, sinon localhost.
+function Get-AdresseAffichage {
+    $candidates = @()
+    # Interface qui porte la route par défaut : la seule dont on sait qu'elle
+    # relie la machine au reste du monde. Les réseaux internes des hyperviseurs
+    # (VMnet, Host-Only) ont une adresse mais ne mènent nulle part.
+    $interfacePrincipale = 0
+    try {
+        $route = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1)
+        if ($route.Count -gt 0) { $interfacePrincipale = [int]$route[0].InterfaceIndex }
+    } catch { }
+    try {
+        $adresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' })
+        foreach ($a in $adresses) {
+            $tailscale = ($a.InterfaceAlias -match '(?i)tailscale')
+            $octets = $a.IPAddress -split '\.'
+            # 100.64.0.0/10 : plage utilisée par Tailscale pour ses adresses
+            if (-not $tailscale -and [int]$octets[0] -eq 100 -and [int]$octets[1] -ge 64 -and [int]$octets[1] -le 127) { $tailscale = $true }
+            $candidates += [pscustomobject]@{
+                Adresse = $a.IPAddress; Tailscale = $tailscale; Interface = $a.InterfaceAlias
+                Principale = ($interfacePrincipale -ne 0 -and [int]$a.InterfaceIndex -eq $interfacePrincipale)
+                Virtuelle = ($a.InterfaceAlias -match '(?i)vmnet|vmware|virtualbox|host-only|hyper-v|loopback|wsl|docker')
+            }
+        }
+    } catch {
+        try {
+            foreach ($ip in [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName())) {
+                if ($ip.AddressFamily -eq 'InterNetwork' -and $ip.ToString() -ne '127.0.0.1') {
+                    $candidates += [pscustomobject]@{ Adresse = $ip.ToString(); Tailscale = $false; Interface = ''; Principale = $false; Virtuelle = $false }
+                }
+            }
+        } catch { }
+    }
+    $ts = @($candidates | Where-Object { $_.Tailscale })
+    if ($ts.Count -gt 0) { return [pscustomobject]@{ Adresse = $ts[0].Adresse; Source = 'Tailscale'; Interface = $ts[0].Interface } }
+    $principale = @($candidates | Where-Object { $_.Principale -and -not $_.Virtuelle })
+    if ($principale.Count -gt 0) { return [pscustomobject]@{ Adresse = $principale[0].Adresse; Source = 'réseau local'; Interface = $principale[0].Interface } }
+    $reelles = @($candidates | Where-Object { -not $_.Virtuelle })
+    if ($reelles.Count -gt 0) { return [pscustomobject]@{ Adresse = $reelles[0].Adresse; Source = 'réseau local'; Interface = $reelles[0].Interface } }
+    return [pscustomobject]@{ Adresse = '127.0.0.1'; Source = 'cette machine seulement'; Interface = '' }
+}
+
+# Lien prêt à ouvrir depuis un téléphone. Le mot de passe y figure : il ne
+# doit aller ni au journal ni dans un fichier.
+function Get-LienVnc {
+    param([Parameter(Mandatory = $true)]$Vm)
+    if (-not $Vm.VncActif) { return $null }
+    $adresse = Get-AdresseAffichage
+    return [pscustomobject]@{
+        Lien    = ('vnc://:{0}@{1}:{2}' -f $Vm.Vnc['motDePasse'], $adresse.Adresse, $Vm.VncPort)
+        Adresse = $adresse.Adresse
+        Source  = $adresse.Source
+        Port    = $Vm.VncPort
+        MotDePasse = [string]$Vm.Vnc['motDePasse']
+    }
+}
+
+# Active l'affichage distant d'une VM : port libre, mot de passe, écriture
+# dans la machine. Renvoie les informations d'accès.
+function Enable-AffichageDistant {
+    param([Parameter(Mandatory = $true)][string]$Nom, [switch]$Silencieux)
+    Connect-Pilote | Out-Null
+    # En simulation, la machine n'existe pas sur le disque : on montre quand
+    # même ce qui serait écrit.
+    $vm = if ($script:Simulation) { Get-VmDuCatalogue -Nom $Nom } else { Get-VmPresente -Nom $Nom }
+    $fiche = $script:Catalogue['vms'][$vm.Nom]
+    $vnc = $fiche['vnc']
+    if (-not $vnc) { $vnc = New-Dictionnaire; $fiche['vnc'] = $vnc }
+    $port = [int]$vnc['port']
+    $ecoutes = @{}
+    foreach ($p in (Get-PortsEcoutes)) { $ecoutes[[int]$p] = $true }
+    # Port déjà attribué à cette VM : on le garde, sauf s'il est hors plage, ou
+    # occupé par un autre programme (s'il l'est alors que l'écran distant était
+    # déjà actif, c'est la VM elle-même qui écoute : on le garde).
+    $horsPlage = ($port -lt [int]$script:Config['vncPortMin'] -or $port -gt [int]$script:Config['vncPortMax'])
+    $occupeAilleurs = ($ecoutes.ContainsKey($port) -and -not ($vnc['actif'] -eq $true))
+    if ($port -le 0 -or $horsPlage -or $occupeAilleurs) { $port = Get-PortVncLibre -Sauf $vm.Nom }
+    $motDePasse = [string]$vnc['motDePasse']
+    if ($motDePasse.Length -ne 8) { $motDePasse = New-MotDePasseVnc }
+    Set-MachineAffichageDistant -Machine $vm.Chemin -Actif $true -Port $port -MotDePasse $motDePasse
+    $vnc['actif'] = $true; $vnc['port'] = $port; $vnc['motDePasse'] = $motDePasse
+    Save-Catalogue
+    if (-not $Silencieux) { Publish-Message 'ok' ("écran distant activé sur le port {0}" -f $port) }
+    return (Get-LienVnc -Vm (Get-VmDuCatalogue -Nom $vm.Nom))
+}
+
+# Retire l'affichage distant et libère le port.
+function Disable-AffichageDistant {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    Connect-Pilote | Out-Null
+    $vm = Get-VmPresente -Nom $Nom
+    $fiche = $script:Catalogue['vms'][$vm.Nom]
+    if (-not $vm.VncActif) {
+        Publish-Message 'info' "La VM « $($vm.Nom) » n'a pas d'écran distant."
+        return $false
+    }
+    Set-MachineAffichageDistant -Machine $vm.Chemin -Actif $false
+    $vnc = $fiche['vnc']
+    $vnc['actif'] = $false; $vnc['port'] = 0; $vnc['motDePasse'] = ''
+    Save-Catalogue
+    Publish-Message 'ok' "Écran distant retiré de « $($vm.Nom) » ; le port est de nouveau libre."
+    return $true
 }
 
 # ----------------------------------------------------------------------------
@@ -2160,6 +2375,8 @@ function Get-ConfigAffichable {
         'dossierVms'        = $(if ($script:Config['dossierVms']) { $script:Config['dossierVms'] } else { '(à côté du modèle)' })
         'espaceDisqueMinGo' = $script:Config['espaceDisqueMinGo']
         'delaiOutilsSec'    = $script:Config['delaiOutilsSec']
+        'vncPortMin'        = $script:Config['vncPortMin']
+        'vncPortMax'        = $script:Config['vncPortMax']
     }
 }
 
@@ -2183,6 +2400,20 @@ function Set-ConfigValeur {
             }
             $script:Config['espaceDisqueMinGo'] = $n
         }
+        'vncportmin' {
+            $n = 0
+            if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 1024 -or $n -gt 65535) {
+                throw (New-ErreurOutil "Valeur invalide pour vncPortMin : $Valeur" 'Indiquez un port entre 1024 et 65535, par exemple 5901.')
+            }
+            $script:Config['vncPortMin'] = $n
+        }
+        'vncportmax' {
+            $n = 0
+            if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 1024 -or $n -gt 65535 -or $n -lt [int]$script:Config['vncPortMin']) {
+                throw (New-ErreurOutil "Valeur invalide pour vncPortMax : $Valeur" ("Indiquez un port entre " + $script:Config['vncPortMin'] + " et 65535."))
+            }
+            $script:Config['vncPortMax'] = $n
+        }
         'delaioutilssec' {
             $n = 0
             if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 5 -or $n -gt 1800) {
@@ -2199,7 +2430,7 @@ function Set-ConfigValeur {
             $script:Config['hyperviseur'] = $Valeur.ToLower()
         }
         default {
-            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, hyperviseur.')
+            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, vncPortMin, vncPortMax, hyperviseur.')
         }
     }
     Save-Config

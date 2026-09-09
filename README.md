@@ -260,6 +260,7 @@ Crée un clone lié du modèle, applique les options, démarre la VM. Toutes les
 | `--nostart` | Crée sans démarrer | désactivé |
 | `--tmp` | VM éphémère : supprimée automatiquement dès qu'elle est trouvée éteinte (voir plus bas) ; incompatible avec `--nostart` | désactivé |
 | `--hostname <nom>` | Nom d'hôte appliqué dans l'invité après le démarrage (voir « Personnalisation de l'invité ») | aucun |
+| `--vnc` | Écran de la VM accessible à distance (voir « Piloter et voir ses VM à distance ») ; `--vnc off` pour l'état par défaut | désactivé |
 
 Exemples :
 
@@ -307,6 +308,7 @@ VM « TP14 » prête et démarrée en 12,4 s.
 | `vazy back <nom> <libelle> [--nostart] [--nogui]` | Retour à un instantané manuel, puis redémarrage |
 | `vazy unsnap <nom> <libelle> [--yes]` | Supprime un instantané manuel, après confirmation |
 | `vazy gc [--yes]` | Supprime les VM éphémères éteintes (le nettoyage se fait aussi tout seul au début de chaque commande) |
+| `vazy vnc <nom> [off]` | Affiche le lien pour voir l'écran de la VM à distance ; l'active si besoin |
 | `vazy doctor` | Diagnostic complet : hyperviseur, disque, modèles, VM, cohérence catalogue / disque |
 | `vazy freeze <nom> [--yes]` | Convertit un clone lié en VM complète : elle ne dépend plus du modèle |
 | `vazy lab up <fichier.json>` | Monte un labo entier décrit par un fichier (voir ci-dessous) |
@@ -443,6 +445,7 @@ Chaque machine accepte **exactement les mêmes clés que les options de créatio
 - `apres` : une chaîne ou une liste de noms de machines du fichier.
 - `nogui`, `nostart` : `true` ou `false`.
 - `hostname` : nom d'hôte appliqué dans l'invité (voir « Personnalisation de l'invité »). **Par défaut, le nom court de la machine** (`dc01`). `false` ou `""` pour ne rien appliquer. Sans méthode de personnalisation sur le modèle, la clé est ignorée avec une ligne d'information.
+- `vnc` : `true` pour rendre l'écran de cette machine accessible à distance (voir « Piloter et voir ses VM à distance »).
 - Une clé inconnue (faute de frappe, `tmp`, `name`) est refusée avant toute action.
 
 Au niveau du labo, la clé `requis` déclare les modèles attendus ; elle est vérifiée avant toute action (voir « Exporter un labo, partager un labo »).
@@ -558,6 +561,93 @@ Deux points : la VM doit être **arrêtée**, et les instantanés ne survivent p
 
 **Limite à connaître avant un TP de routage** : le champ `mode` se limite à `nat`, `bridged` et `hostonly`, c'est-à-dire VMnet8, VMnet0 et VMnet1. Les segments réseau personnalisés (VMnet2, VMnet3, ...) sont **hors périmètre** : ils se créent dans le Virtual Network Editor de VMware avec les droits administrateur, et vazy ne les gère pas. Toutes les machines en `hostonly` partagent le même segment VMnet1 ; deux labos en `hostonly` montés en même temps se voient. Si vous avez déjà créé un VMnet personnalisé à la main, une machine peut s'y brancher via `set` (`"set": { "ethernet0.connectionType": "custom", "ethernet0.vnet": "VMnet2" }`), mais vazy ne vérifie ni son existence ni son adressage.
 
+### Piloter et voir ses VM à distance (téléphone, autre poste)
+
+Le but : depuis une appli terminal sur le téléphone, taper une commande et voir l'écran de la VM, sans rien saisir à la main.
+
+```
+vazy ubuntu-server --nogui --vnc
+```
+
+Deux morceaux : le terminal passe par SSH, l'écran passe par le serveur VNC intégré à VMware Workstation Pro.
+
+#### 1. Le terminal : serveur SSH sur le PC
+
+Windows 11 embarque un serveur SSH, il suffit de l'activer. Dans un **PowerShell administrateur** :
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+```
+
+L'installation crée la règle de pare-feu pour le port 22. Vérifiez que le service tourne avec `Get-Service sshd`.
+
+Depuis le téléphone, une appli terminal qui gère SSH (Termux, Termius, JuiceSSH sur Android ; Termius, Blink sur iOS), puis `ssh anthony.cernon@ADRESSE_DU_PC`. Le shell par défaut d'OpenSSH sur Windows est `cmd.exe`, et `vazy` y fonctionne tel quel.
+
+**Par clé plutôt que par mot de passe**, pour ne rien retaper : générez une clé sur le téléphone (`ssh-keygen -t ed25519`), puis collez la clé publique dans `C:\Users\<vous>\.ssh\authorized_keys` sur le PC. Attention, un compte administrateur sous Windows utilise `C:\ProgramData\ssh\administrators_authorized_keys` à la place, avec des droits restreints.
+
+**Depuis l'extérieur, sans ouvrir de port sur la box : Tailscale.** C'est un réseau privé qui relie vos appareils entre eux, où qu'ils soient. Installez-le sur le PC (`winget install tailscale.tailscale`) et sur le téléphone, connectez les deux au même compte. Chaque appareil reçoit une adresse fixe en `100.x.y.z`, joignable de partout, chiffrée de bout en bout, sans redirection de port ni adresse publique. C'est la solution recommandée ici : rien n'est exposé à internet.
+
+#### 2. L'écran : `--vnc`
+
+VMware Workstation Pro embarque un serveur VNC, piloté par trois lignes du fichier de configuration de la VM. Rien à installer, c'est le même mécanisme que tout le reste de vazy : écrire du texte dans un fichier.
+
+```
+vazy ubuntu-server --nogui --vnc
+```
+
+vazy choisit un port libre dans la plage réservée (5901 à 5999 par défaut, réglable avec `vncPortMin` et `vncPortMax`), vérifie qu'il n'est pris ni par une autre VM ni par un programme de la machine, tire un mot de passe au hasard, et affiche :
+
+```
+  Écran de « ubuntu-server-1 » depuis un autre appareil :
+  vnc://:Kj7mQp2x@100.94.31.7:5901
+  adresse 100.94.31.7 (Tailscale), port 5901, mot de passe Kj7mQp2x
+  Appuyez sur le lien depuis votre téléphone : votre client VNC s'ouvre, tout est prérempli.
+```
+
+Les applis terminal rendent ce lien tapotable : un appui ouvre le client VNC avec l'adresse, le port et le mot de passe déjà remplis.
+
+| Commande | Effet |
+|---|---|
+| `vazy <modele> --vnc` | Crée la VM avec l'écran distant activé |
+| `vazy vnc <nom>` | Réaffiche le lien ; active l'écran distant s'il ne l'était pas |
+| `vazy vnc <nom> off` | Retire l'écran distant et libère le port |
+| `"vnc": true` | Dans un fichier de labo, par machine |
+
+L'adresse affichée est celle de Tailscale si une interface Tailscale existe, sinon celle du réseau local, sinon `127.0.0.1`. C'est toujours celle qui a le plus de chances de fonctionner depuis le téléphone. Les adresses des réseaux internes de VMware (VMnet) sont écartées, elles ne sont jamais joignables de l'extérieur.
+
+Le mot de passe fait exactement 8 caractères. Ce n'est pas un choix, c'est la limite du protocole VNC. Il est tiré au hasard pour chaque VM, conservé au catalogue, et n'apparaît **que** dans le lien affiché à l'écran : jamais dans le journal, jamais dans un message d'erreur.
+
+**Sur un téléphone, il faut une appli VNC qui gère les liens `vnc://`** : bVNC ou RealVNC Viewer sur Android, RealVNC Viewer sur iOS. Sans elle, le lien n'ouvre rien ; recopiez alors l'adresse, le port et le mot de passe affichés juste en dessous.
+
+#### 3. La règle de pare-feu, sinon rien ne marchera
+
+Le pare-feu Windows bloque par défaut les ports VNC. Dans un **PowerShell administrateur**, une seule fois :
+
+```powershell
+New-NetFirewallRule -DisplayName "vazy VNC (Tailscale)" -Direction Inbound -Protocol TCP -LocalPort 5901-5999 -RemoteAddress 100.64.0.0/10 -Action Allow
+```
+
+Cette règle n'autorise que les adresses Tailscale. Pour y ajouter votre réseau local, adaptez `-RemoteAddress` (par exemple `@('100.64.0.0/10','192.168.1.0/24')`). N'ouvrez jamais ces ports sans restriction d'adresse.
+
+#### 4. Sécurité : ce qu'il ne faut pas faire
+
+**N'exposez jamais un port VNC sur internet.** Le VNC de VMware ne chiffre rien : le mot de passe, les frappes clavier et l'écran circulent en clair. Le mot de passe est limité à 8 caractères par le protocole, avec un chiffrement obsolète, cassable en quelques minutes. Concrètement : pas de redirection de port sur la box, jamais.
+
+Deux façons sûres d'y accéder de l'extérieur :
+
+- **Tailscale**, recommandé : le trafic est chiffré de bout en bout entre vos appareils, rien n'est exposé.
+- **Un tunnel dans la connexion SSH**, si vous préférez ne rien installer de plus. Depuis le téléphone : `ssh -L 5901:127.0.0.1:5901 anthony.cernon@ADRESSE_DU_PC`, puis pointez le client VNC sur `127.0.0.1:5901`. Le VNC voyage alors dans le tunnel SSH, chiffré. Le lien affiché par vazy ne conviendra pas dans ce cas, l'adresse étant différente.
+
+Le serveur VNC de VMware écoute sur toutes les interfaces de la machine ; c'est la règle de pare-feu ci-dessus qui restreint qui peut l'atteindre. Ne la retirez pas.
+
+#### Ce qu'il faut savoir avant le premier essai
+
+- Les lignes VNC sont **lues au démarrage de la VM**. Activer l'écran distant sur une VM qui tourne déjà n'a d'effet qu'après un redémarrage ; vazy le dit et donne la commande.
+- Depuis une session SSH, préférez `--nogui`. Une session SSH n'a pas de bureau : l'ouverture d'une fenêtre VMware peut échouer ou s'afficher sur la session déjà ouverte sur le PC. Avec `--nogui`, la VM tourne sans fenêtre et l'écran distant devient le moyen de la voir, ce qui est exactement le but.
+- Le serveur VNC intégré peut refuser de démarrer si l'accélération 3D est activée dans la VM. Si l'écran reste noir, désactivez-la : `--set mks.enable3d=FALSE`.
+
 ### Personnalisation de l'invité (nom d'hôte)
 
 Les clones d'un modèle sont identiques : même nom d'hôte, même identifiant machine, mêmes clés SSH. vazy peut donner à chaque clone son **nom d'hôte**, avec `--hostname` ou, dans un labo, le nom court de chaque machine par défaut. Deux méthodes, choisies d'après le modèle (`vazy template list` l'affiche) :
@@ -625,6 +715,7 @@ Clés de `config.json`, modifiables avec `vazy config <cle> <valeur>` (valeur `"
 | `outilHyperviseur` | Chemin de l'outil en ligne de commande de l'hyperviseur (`vmrun.exe`) si la détection automatique échoue | vide : détection automatique |
 | `espaceDisqueMinGo` | Marge d'espace libre exigée, en plus de la RAM de la VM | `1` |
 | `delaiOutilsSec` | Attente maximale des outils invité avant d'appliquer un nom d'hôte (5 à 1800 s) | `120` |
+| `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants des VM | `5901`, `5999` |
 | `hyperviseur` | Pilote utilisé (`lib\pilote-<hyperviseur>.ps1`) | `vmware` |
 
 Espace disque : avant de cloner, vazy vérifie qu'il reste au moins `RAM de la VM + espaceDisqueMinGo` Go sur le disque de destination (VMware crée pendant l'exécution un fichier de mémoire de la taille de la RAM). Sinon il refuse, sans rien créer.
@@ -781,6 +872,7 @@ L'invité (personnalisation) :
 | Fonction | Rôle |
 |---|---|
 | `Set-MachineVariableInvite -Machine -Nom [-Valeur]` | Dépose une variable guestinfo lisible dans l'invité (machine éteinte ; valeur vide = retire) |
+| `Set-MachineAffichageDistant -Machine -Actif [-Port] [-MotDePasse]` | Active ou retire le serveur d'affichage distant intégré à l'hyperviseur |
 | `Get-MachineSystemeInvite -Machine` | `linux`, `windows` ou `inconnu`, d'après la configuration de la machine |
 | `Wait-MachineOutils -Machine [-DelaiMaxSec]` | `$true` dès que les outils invité répondent, `$false` passé le délai |
 | `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité avec un `PSCredential` (repli) et renvoie son code de sortie ; retente si l'invité n'est pas encore prêt ; le mot de passe n'apparaît dans aucun message |

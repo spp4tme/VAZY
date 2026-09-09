@@ -114,6 +114,8 @@ USAGE
                                      arrête et supprime tout le labo (--stop-only : arrête sans supprimer)
   vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
                                      génère le fichier de labo qui recréerait des VM existantes
+  vazy vnc <nom> [off]               affiche le lien pour voir l'écran de la VM depuis un
+                                     téléphone ou un autre poste (l'active si besoin)
   vazy doctor                        diagnostic : hyperviseur, disque, modèles, VM, cohérence
   vazy freeze <nom> [--yes]          rend une VM autonome (clone complet : ne dépend plus du modèle)
   vazy config [<cle> <valeur>]       affiche ou modifie la configuration
@@ -139,6 +141,8 @@ OPTIONS DE CRÉATION (toutes facultatives)
                      (incompatible avec --nostart)
   --hostname <nom>   nom d'hôte appliqué dans l'invité à chaque démarrage (modèle guestinfo :
                      vazy template mark <modele> --guestinfo ; repli : vazy template creds)
+  --vnc [off]        écran de la VM accessible à distance : vazy choisit un port libre, tire
+                     un mot de passe, et affiche un lien vnc:// à appuyer depuis le téléphone
 
 EXEMPLES
   vazy ubuntu-server
@@ -152,6 +156,8 @@ EXEMPLES
   vazy template mark ubuntu-server --guestinfo   puis   vazy ubuntu-server --hostname web1
   vazy ubuntu-server --dry-run       montre ce qui serait fait, sans rien faire
   vazy lab export tp14.json --prefixe tp14 --requis
+  vazy ubuntu-server --nogui --vnc    depuis une session SSH : la VM tourne sans fenêtre, on
+                                     la regarde depuis le téléphone (voir README, « à distance »)
 
 RÈGLE ABSOLUE
   Un modèle ne se démarre jamais et son instantané ne se supprime jamais :
@@ -181,6 +187,7 @@ function ConvertFrom-Arguments {
                            'labo', 'prefixe', 'vms', 'delai')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
                            'dry-run', 'requis', 'tout')
+    $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
         Options      = @{}
@@ -197,6 +204,17 @@ function ConvertFrom-Arguments {
             $egal = $nom.IndexOf('=')
             if ($egal -ge 0) { $valeur = $nom.Substring($egal + 1); $nom = $nom.Substring(0, $egal) }
             $nom = $nom.ToLower()
+            # Options à valeur facultative : « --vnc » active, « --vnc off » retire.
+            if ($optionsFacultatives -contains $nom) {
+                if ($null -eq $valeur -and ($i + 1) -lt $Jetons.Count -and $Jetons[$i + 1] -in 'on', 'off', 'oui', 'non') {
+                    $valeur = $Jetons[$i + 1]; $i++
+                }
+                $resultat.Options[$nom] = $(if ($null -eq $valeur) { 'on' } else { $valeur.ToLower() })
+                if ($resultat.Options[$nom] -notin 'on', 'off', 'oui', 'non') {
+                    throw (New-ErreurUsage "L'option --$nom accepte « on » ou « off » (reçu : « $valeur »).")
+                }
+                $i++; continue
+            }
             if ($drapeaux -contains $nom) {
                 if ($null -ne $valeur) { throw (New-ErreurUsage "L'option --$nom ne prend pas de valeur.") }
                 $resultat.Options[$nom] = $true
@@ -295,6 +313,13 @@ function ConvertTo-ListeModes {
     return , $liste
 }
 
+# Valeur d'une option à valeur facultative (--vnc / --vnc off) -> booléen.
+function Test-OptionActivee {
+    param($Analyse, [string]$Nom)
+    if (-not $Analyse.Options.ContainsKey($Nom)) { return $false }
+    return ([string]$Analyse.Options[$Nom] -in 'on', 'oui')
+}
+
 # true / false / "oui" / "non" / 1 / 0 -> booléen.
 function ConvertTo-Booleen {
     param($Valeur, [string]$Cle)
@@ -379,7 +404,7 @@ function Read-FichierLabo {
         $e = New-ErreurOutil "Fichier $fichier : la clé « machines » manque ou n'est pas un objet { \"nom\": { ... }, ... }." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
     }
 
-    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'set', 'nogui', 'nostart', 'apres', 'hostname')
+    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'set', 'nogui', 'nostart', 'apres', 'hostname', 'vnc')
     $machines = @()
     foreach ($p in $json.machines.PSObject.Properties) {
         $nomMachine = $p.Name
@@ -428,9 +453,10 @@ function Read-FichierLabo {
             } elseif (Test-NomHote -NomHote $nomHote) {
                 $nomHote = ''   # nom de machine impossible comme nom d'hôte (point, underscore...) : pas de renommage par défaut
             }
+            $vnc = if ($def.PSObject.Properties['vnc']) { ConvertTo-Booleen -Valeur $def.vnc -Cle 'vnc' } else { $false }
             $machines += [pscustomobject]@{
                 Nom = $nomMachine; Modele = ([string]$def.modele).Trim(); RamGo = $ramGo; Cpu = $cpu; Modes = @($modes); Brut = @($brut)
-                SansInterface = $nogui; SansDemarrage = $nostart; Apres = @($apres); NomHote = $nomHote
+                SansInterface = $nogui; SansDemarrage = $nostart; Apres = @($apres); NomHote = $nomHote; Vnc = $vnc
             }
         } catch {
             $e = New-ErreurOutil ("Fichier {0}, machine « {1} » : {2}" -f $fichier, $nomMachine, $_.Exception.Message) $conseilFormat
@@ -496,7 +522,8 @@ function Invoke-CommandeCreation {
     Write-Host ("vazy : création d'une VM {1}depuis le modèle « {0} »" -f $modele, $(if ($o.ContainsKey('tmp')) { 'éphémère ' } else { '' })) -ForegroundColor White
     # .ToArray() et non @(...) : en PowerShell 5.1, @() sur une List[object] vide échoue.
     $resultat = New-VmDepuisModele -Modele $modele -Nom $nom -RamGo $ramGo -Cpu $cpu -Modes $modes -Brut $Analyse.Sets.ToArray() `
-                                   -SansInterface:$o.ContainsKey('nogui') -SansDemarrage:$o.ContainsKey('nostart') -Ephemere:$o.ContainsKey('tmp') -NomHote $nomHote
+                                   -SansInterface:$o.ContainsKey('nogui') -SansDemarrage:$o.ContainsKey('nostart') -Ephemere:$o.ContainsKey('tmp') -NomHote $nomHote `
+                                   -Vnc:(Test-OptionActivee -Analyse $Analyse -Nom 'vnc')
 
     Write-Host ''
     if (Test-Simulation) {
@@ -507,6 +534,7 @@ function Invoke-CommandeCreation {
     $tmp = if ($resultat.Ephemere) { ' (éphémère)' } else { '' }
     Write-Host ('VM « {0} » {1} en {2}{3}.' -f $resultat.Nom, $etat, ('{0:0.0} s' -f $resultat.Duree), $tmp) -ForegroundColor Green
     Write-Host ('  dossier : {0}' -f $resultat.Dossier) -ForegroundColor Gray
+    if ($resultat.Vnc) { Write-AccesVnc -Acces $resultat.Vnc -Nom $resultat.Nom -Demarree $resultat.Demarree }
     if ($resultat.Ephemere) {
         Write-Host ('  quand vous avez fini : vazy stop {0} (la supprime), ou éteignez-la de l''intérieur' -f $resultat.Nom) -ForegroundColor Gray
     } elseif ($resultat.Demarree) {
@@ -537,11 +565,12 @@ function Invoke-CommandeList {
     $lignes = New-Object 'System.Collections.Generic.List[object]'
     foreach ($vm in $vms) {
         $date = try { ([datetime]::Parse($vm.CreeeLe)).ToString('dd/MM/yyyy HH:mm') } catch { [string]$vm.CreeeLe }
-        $lignes.Add(@($vm.Nom, $vm.Etat, $vm.Modele, ('{0} Go' -f $vm.RamGo), [string]$vm.Cpu, $vm.Reseau, $(if ($vm.Ephemere) { 'oui' } else { '' }), [string]$vm.Labo, $date))
+        $lignes.Add(@($vm.Nom, $vm.Etat, $vm.Modele, ('{0} Go' -f $vm.RamGo), [string]$vm.Cpu, $vm.Reseau, $(if ($vm.Ephemere) { 'oui' } else { '' }), [string]$vm.Labo, $(if ($vm.VncPort -gt 0) { [string]$vm.VncPort } else { '' }), $date))
     }
-    Write-Tableau -EnTetes @('NOM', 'ÉTAT', 'MODÈLE', 'RAM', 'CPU', 'RÉSEAU', 'TMP', 'LABO', 'CRÉÉE LE') -Lignes $lignes.ToArray() -Couleurs {
+    Write-Tableau -EnTetes @('NOM', 'ÉTAT', 'MODÈLE', 'RAM', 'CPU', 'RÉSEAU', 'TMP', 'LABO', 'ÉCRAN', 'CRÉÉE LE') -Lignes $lignes.ToArray() -Couleurs {
         param($colonne, $valeur)
         if ($colonne -eq 6 -and $valeur -eq 'oui') { return 'Yellow' }
+        if ($colonne -eq 8 -and $valeur) { return 'Cyan' }
         if ($colonne -ne 1) { return $null }
         switch ($valeur) { 'en marche' { 'Green' } 'absente' { 'Red' } default { 'DarkGray' } }
     }
@@ -549,6 +578,9 @@ function Invoke-CommandeList {
     if ($ephemeres.Count -gt 0) {
         Write-Host ''
         Write-Host '  TMP « oui » : VM éphémère, supprimée automatiquement dès qu''elle est trouvée éteinte.' -ForegroundColor Gray
+    }
+    if (@($vms | Where-Object { $_.VncPort -gt 0 }).Count -gt 0) {
+        Write-Host '  ÉCRAN : port de l''écran distant. Le lien à ouvrir : vazy vnc <nom>' -ForegroundColor Gray
     }
     $absentes = @($vms | Where-Object { $_.Etat -eq 'absente' })
     if ($absentes.Count -gt 0) {
@@ -765,6 +797,49 @@ function Write-TableauLabo {
         if ($colonne -ne 2) { return $null }
         switch ($valeur) { 'en marche' { 'Green' } 'absente' { 'Red' } 'hors labo' { 'Red' } 'à créer' { 'Yellow' } default { 'DarkGray' } }
     }
+}
+
+# Affiche l'accès à l'écran distant : le lien d'abord, il suffit de l'appuyer
+# depuis un téléphone. Le mot de passe n'existe que là, jamais dans un fichier.
+function Write-AccesVnc {
+    param($Acces, [string]$Nom, [bool]$Demarree = $true)
+    Write-Host ''
+    Write-Host ('  Écran de « {0} » depuis un autre appareil :' -f $Nom) -ForegroundColor White
+    Write-Host ('  ' + $Acces.Lien) -ForegroundColor Cyan
+    Write-Host ('  adresse {0} ({1}), port {2}, mot de passe {3}' -f $Acces.Adresse, $Acces.Source, $Acces.Port, $Acces.MotDePasse) -ForegroundColor Gray
+    if ($Acces.Source -eq 'Tailscale') {
+        Write-Host '  Appuyez sur le lien depuis votre téléphone : votre client VNC s''ouvre, tout est prérempli.' -ForegroundColor Gray
+    } elseif ($Acces.Adresse -eq '127.0.0.1') {
+        Write-Host '  Aucune adresse joignable depuis un autre appareil : installez Tailscale (voir README).' -ForegroundColor Yellow
+    } else {
+        Write-Host '  Adresse du réseau local : joignable depuis le même réseau seulement. Tailscale la remplacerait partout (voir README).' -ForegroundColor Gray
+    }
+    if (-not $Demarree) { Write-Host '  L''écran ne répondra qu''une fois la VM démarrée.' -ForegroundColor Gray }
+}
+
+function Invoke-CommandeVnc {
+    param($Analyse)
+    if ($Analyse.Positionnels.Count -lt 2) { throw (New-ErreurUsage 'Usage : vazy vnc <nom>   (affiche le lien ; l''active si besoin)   |   vazy vnc <nom> off') }
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+    $nom = $Analyse.Positionnels[1]
+    $arret = ($Analyse.Positionnels.Count -ge 3 -and $Analyse.Positionnels[2].ToLower() -in 'off', 'non') -or
+             ($Analyse.Options.ContainsKey('vnc') -and -not (Test-OptionActivee -Analyse $Analyse -Nom 'vnc'))
+    if ($Analyse.Positionnels.Count -ge 3 -and $Analyse.Positionnels[2].ToLower() -notin 'off', 'non', 'on', 'oui') {
+        throw (New-ErreurUsage "Argument inattendu : $($Analyse.Positionnels[2]). Usage : vazy vnc <nom> [off]")
+    }
+    $vm = Get-VmDuCatalogue -Nom $nom
+    if ($arret) { Disable-AffichageDistant -Nom $vm.Nom | Out-Null; return }
+
+    $etaitActif = $vm.VncActif
+    $acces = Enable-AffichageDistant -Nom $vm.Nom -Silencieux:$etaitActif
+    if (-not $acces) { return }
+    Write-AccesVnc -Acces $acces -Nom $vm.Nom
+    if (-not $etaitActif -and (Test-VmEnMarche -Nom $vm.Nom)) {
+        Write-Host ''
+        Write-Host ('  La VM tourne déjà : sa configuration a été lue au démarrage, l''écran distant ne répondra qu''après un redémarrage.') -ForegroundColor Yellow
+        Write-Host ('  vazy stop {0} puis vazy start {0}' -f $vm.Nom) -ForegroundColor Yellow
+    }
+    Write-Host ('  Retirer : vazy vnc {0} off' -f $vm.Nom) -ForegroundColor Gray
 }
 
 function Invoke-CommandeDoctor {
@@ -987,6 +1062,7 @@ try {
             'lab'      { Invoke-CommandeLab      -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
+            'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }
             'template' { Invoke-CommandeTemplate -Analyse $analyse }
             'config'   { Invoke-CommandeConfig   -Analyse $analyse }
             default    { Invoke-CommandeCreation -Analyse $analyse }
