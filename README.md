@@ -1,131 +1,187 @@
 # vazy
 
-Une commande, une VM.
+**Une commande, une VM.**
 
 ```
 vazy ubuntu-server --name TP14 --ram 4 --cpu 2
 ```
 
-En quelques secondes, vazy crée un **clone lié** d'un modèle VMware, règle la RAM, les CPU et le réseau, puis démarre la machine. Zéro clic dans VMware Workstation, zéro installation de système : le système a été installé une seule fois, dans le modèle.
+En quelques secondes, vazy crée un **clone lié** d'un modèle VMware, règle la mémoire, les processeurs et le réseau, puis démarre la machine. Aucun clic dans VMware Workstation, aucune installation de système : le système a été installé une seule fois, dans le modèle.
 
-- Système : Windows 11, VMware Workstation Pro.
-- Langage : PowerShell 5.1 (livré avec Windows), aucune dépendance à installer.
-- Le nom : « vas-y ». Quatre lettres, faciles à taper des milliers de fois.
+|  |  |
+|---|---|
+| **Système** | Windows 11, VMware Workstation Pro |
+| **Langage** | PowerShell 5.1, livré avec Windows |
+| **Dépendances** | aucune, rien à installer |
+| **Version** | 1.8.0 |
+| **Le nom** | « vas-y ». Quatre lettres, faciles à taper des milliers de fois. |
+
+Ce que vazy sait faire, en une phrase chacun : créer une VM en quelques secondes, la remettre à neuf après l'avoir cassée, monter un TP entier de plusieurs machines en une ligne, en garder la recette pour la semaine suivante, donner à chaque clone son propre nom d'hôte sans jamais entrer dedans, montrer l'écran d'une VM sur un téléphone, et dire ce qui ne va pas quand quelque chose casse.
 
 ---
 
 ## Sommaire
 
-1. [Comment ça marche](#1-comment-ça-marche)
-2. [Installation et ajout au PATH](#2-installation-et-ajout-au-path)
-3. [Préparer un modèle depuis zéro](#3-préparer-un-modèle-depuis-zéro)
-4. [Utilisation](#4-utilisation)
-5. [`--set` : régler n'importe quel paramètre](#5---set--régler-nimporte-quel-paramètre)
-6. [Configuration et fichiers](#6-configuration-et-fichiers)
-7. [Problèmes fréquents](#7-problèmes-fréquents)
-8. [Limites de cette version](#8-limites-de-cette-version)
-9. [Architecture : trois couches, un pilote](#9-architecture--trois-couches-un-pilote)
+1. [Démarrage rapide](#1-démarrage-rapide)
+2. [Le principe : modèles et clones liés](#2-le-principe--modèles-et-clones-liés)
+3. [Installation](#3-installation)
+4. [Préparer un modèle](#4-préparer-un-modèle)
+5. [Créer et gérer des VM](#5-créer-et-gérer-des-vm)
+6. [Remise à zéro et instantanés](#6-remise-à-zéro-et-instantanés)
+7. [VM éphémères](#7-vm-éphémères)
+8. [Les labos : monter un TP entier](#8-les-labos--monter-un-tp-entier)
+9. [Partager un labo](#9-partager-un-labo)
+10. [Piloter et voir ses VM à distance](#10-piloter-et-voir-ses-vm-à-distance)
+11. [Personnalisation de l'invité](#11-personnalisation-de-linvité)
+12. [Protéger son travail : doctor, empreinte, freeze](#12-protéger-son-travail--doctor-empreinte-freeze)
+13. [Régler n'importe quel paramètre avec `--set`](#13-régler-nimporte-quel-paramètre)
+14. [Outillage : simulation, journal, configuration](#14-outillage--simulation-journal-configuration)
+15. [Référence des commandes](#15-référence-des-commandes)
+16. [Dépannage](#16-dépannage)
+17. [Limites connues](#17-limites-connues)
+18. [Architecture](#18-architecture)
+19. [Historique des versions](#19-historique-des-versions)
 
 ---
 
-## 1. Comment ça marche
+## 1. Démarrage rapide
 
-Un **modèle** est une VM que vous préparez une seule fois à la main (installation du système, mises à jour, outils VMware), que vous éteignez, et dont vous prenez un **instantané**. Ce modèle n'est plus jamais démarré.
+Si le modèle est déjà prêt et vazy installé, voici l'essentiel en dix lignes.
 
-Chaque VM créée par vazy est un **clone lié** de cet instantané : elle ne stocke sur le disque que ses différences par rapport au modèle. La création est donc instantanée, et dix VM Ubuntu coûtent à peu près le prix d'une seule.
+```
+vazy ubuntu-server                       une VM, créée et démarrée
+vazy ubuntu-server --name TP14 --ram 4   avec un nom et 4 Go
+vazy list                                ce qui existe et son état
+vazy reset TP14                          le TP est cassé : retour à l'état neuf
+vazy stop TP14                           arrêt propre
+vazy rm TP14                             suppression, fichiers compris
 
-Deux règles absolues en découlent :
+vazy ubuntu-server --tmp                 jetable : disparaît dès qu'elle est éteinte
+vazy lab up tp14 --vm dc01:win2022:4 --vm client:win11:4 --save
+vazy lab up tp14                         la semaine suivante, une seule commande
+vazy doctor                              tout va bien ?
+```
 
-1. **Un modèle ne se démarre jamais.** vazy refuse de le faire (`vazy start <modele>` est rejeté). Si son disque de base change, tous les clones cassent.
-2. **L'instantané d'un modèle ne se supprime jamais.** Supprimer (ou « consolider ») l'instantané réécrit le disque de base : tous les clones qui en dépendent deviennent inutilisables.
-
-Point technique, pour être précis : ce qui casse réellement les clones, c'est la modification du disque de base, donc la suppression de l'instantané. Démarrer le modèle après l'instantané écrit dans un disque de différences séparé et ne casse rien par lui-même. La règle « jamais démarré » reste la protection la plus simple et la plus sûre : elle évite toute fausse manœuvre dans VMware (revenir en arrière, supprimer l'instantané par erreur). Voir « Mettre à jour un modèle » plus bas pour la procédure d'exception.
+Si rien n'est encore en place, l'ordre est : [installer vazy](#3-installation), puis [préparer un modèle](#4-préparer-un-modèle) une fois pour toutes. Comptez une heure pour le premier modèle, quelques secondes pour chaque VM ensuite.
 
 ---
 
-## 2. Installation et ajout au PATH
+## 2. Le principe : modèles et clones liés
 
-**Prérequis** : VMware Workstation Pro installé (vazy cherche `vmrun.exe` dans `C:\Program Files (x86)\VMware\VMware Workstation\`, dans le registre, puis dans le PATH).
+Un **modèle** est une VM que vous préparez une seule fois à la main : installation du système, mises à jour, outils d'intégration. Vous l'éteignez, vous prenez un **instantané**, et vous ne la démarrez plus jamais.
 
-1. Copiez le dossier `vazy` à un emplacement stable, par exemple `C:\Outils\vazy`. Le dossier contient :
+Chaque VM créée par vazy est un **clone lié** de cet instantané : elle ne stocke sur le disque que ses différences par rapport au modèle. La création est donc quasi instantanée, et dix VM Ubuntu coûtent à peu près le prix d'une seule.
 
-   ```
-   vazy\
-     vazy.cmd                 point d'entrée (c'est lui que vous tapez)
-     lib\interface.ps1        couche 1 : ligne de commande, fichiers de labo, affichage
-     lib\logique.ps1          couche 2 : catalogue, vérifications, enchaînement
-     lib\pilote-vmware.ps1    couche 3 : vmrun et fichiers .vmx
-     exemples\tp14-ad.json    exemple de fichier de labo
-     invite\linux\            script d'auto-configuration à installer dans un modèle Linux
-     invite\windows\          idem pour un modèle Windows
-     README.md
-   ```
+Deux règles absolues en découlent.
 
-2. Ajoutez ce dossier au PATH utilisateur. Deux méthodes au choix.
+**Un modèle ne se démarre jamais.** vazy refuse de le faire, et pose même un fichier témoin à côté du modèle pour que le refus vienne de la couche la plus basse, quoi qu'il arrive au catalogue.
 
-   **Avec PowerShell** (une seule fois, à adapter au chemin choisi) :
+**L'instantané d'un modèle ne se supprime jamais.** Le supprimer ou le « consolider » réécrit le disque de base, et tous les clones qui en dépendent deviennent inutilisables d'un coup.
 
-   ```powershell
-   $dossier = 'C:\Outils\vazy'
-   $actuel = [Environment]::GetEnvironmentVariable('Path', 'User')
-   [Environment]::SetEnvironmentVariable('Path', ($actuel.TrimEnd(';') + ';' + $dossier), 'User')
-   ```
+Pour être précis sur le pourquoi : ce qui casse réellement les clones, c'est la modification du disque de base, donc la suppression de l'instantané. Démarrer le modèle après l'instantané écrit dans un disque de différences séparé et ne casse rien par soi-même. La règle « jamais démarré » reste la protection la plus simple : elle évite toute fausse manœuvre dans l'interface de VMware. La [procédure d'exception](#47-mettre-à-jour-un-modèle) explique comment mettre un modèle à jour quand c'est vraiment nécessaire.
 
-   **Avec l'interface Windows** : touche Windows, tapez « variables d'environnement », ouvrez « Modifier les variables d'environnement pour votre compte », sélectionnez `Path` dans la partie « Variables utilisateur », « Modifier », « Nouveau », collez le chemin du dossier, OK partout.
+**Vocabulaire employé dans ce document.**
 
-3. Fermez et rouvrez votre terminal (cmd, PowerShell ou Windows Terminal), puis vérifiez :
+| Terme | Sens |
+|---|---|
+| Modèle | La VM de référence, jamais démarrée, enregistrée dans vazy sous un alias court |
+| Clone lié | Une VM créée par vazy, qui ne contient que ses différences avec le modèle |
+| Instantané d'ancrage | L'instantané du modèle sur lequel les clones s'appuient, souvent nommé `base` |
+| `vazy-neuf` | L'instantané pris sur chaque clone à sa création, cible de `vazy reset` |
+| Catalogue | Le fichier où vazy note ses modèles et ses VM |
+| Labo | Un ensemble de VM décrites ensemble, montées et démontées ensemble |
+| Invité | Le système qui tourne dans la VM, par opposition à l'hôte |
 
-   ```
-   vazy help
-   ```
+---
 
-   Le bas de l'aide affiche où vazy a trouvé `vmrun.exe` et où il range sa configuration.
+## 3. Installation
 
-**Politique d'exécution des scripts** : rien à changer. `vazy.cmd` lance PowerShell avec `-ExecutionPolicy Bypass` pour ses propres scripts uniquement ; la politique de votre session n'est pas modifiée. C'est aussi pour cela que le point d'entrée est un `.cmd` et non un `.ps1` : avec la politique `Restricted` par défaut de Windows 11, un `.ps1` dans le PATH échouerait.
+**Prérequis** : VMware Workstation Pro. vazy cherche `vmrun.exe` dans `C:\Program Files (x86)\VMware\VMware Workstation\`, puis dans le registre, puis dans le PATH.
 
-**Facultatif** : choisir où seront créées les VM (par défaut, dans le dossier parent du modèle, donc sur le même disque) :
+### 3.1 Poser le dossier
+
+Copiez le dossier `vazy` à un emplacement stable, par exemple `C:\Outils\vazy`. Il contient :
+
+```
+vazy\
+  vazy.cmd                 point d'entrée : c'est lui que vous tapez
+  lib\interface.ps1        couche 1 : ligne de commande, fichiers de labo, affichage
+  lib\logique.ps1          couche 2 : catalogue, vérifications, enchaînement
+  lib\pilote-vmware.ps1    couche 3 : vmrun et fichiers .vmx
+  exemples\                exemple de fichier de labo
+  invite\linux\            script d'auto-configuration pour un modèle Linux
+  invite\windows\          le même pour un modèle Windows
+  README.md
+```
+
+### 3.2 Ajouter au PATH
+
+Avec PowerShell, une seule fois, en adaptant le chemin :
+
+```powershell
+$dossier = 'C:\Outils\vazy'
+$actuel = [Environment]::GetEnvironmentVariable('Path', 'User')
+[Environment]::SetEnvironmentVariable('Path', ($actuel.TrimEnd(';') + ';' + $dossier), 'User')
+```
+
+Ou par l'interface : touche Windows, tapez « variables d'environnement », ouvrez « Modifier les variables d'environnement pour votre compte », sélectionnez `Path` dans la partie « Variables utilisateur », « Modifier », « Nouveau », collez le chemin, validez.
+
+Fermez et rouvrez votre terminal, puis vérifiez :
+
+```
+vazy help
+```
+
+Le bas de l'aide affiche où vazy a trouvé `vmrun.exe` et où il range ses fichiers.
+
+### 3.3 Points d'installation à connaître
+
+**Politique d'exécution des scripts : rien à changer.** `vazy.cmd` lance PowerShell avec `-ExecutionPolicy Bypass` pour ses propres scripts seulement ; la politique de votre session n'est pas modifiée. C'est aussi pourquoi le point d'entrée est un `.cmd` et non un `.ps1` : avec la politique `Restricted` par défaut de Windows 11, un `.ps1` posé dans le PATH échouerait, et PowerShell le préférerait au `.cmd`.
+
+**Où seront créées les VM.** Par défaut, dans le dossier parent du modèle, donc sur le même disque. Pour choisir :
 
 ```
 vazy config dossierVms D:\VMs
 ```
 
-Évitez un dossier synchronisé par OneDrive pour les VM.
+Évitez un dossier synchronisé par OneDrive : les disques virtuels changent en permanence et la synchronisation ne suivra pas.
 
 ---
 
-## 3. Préparer un modèle depuis zéro
+## 4. Préparer un modèle
 
-À faire une seule fois par système (une fois pour Ubuntu Server, une fois pour Windows 11...). Comptez le temps d'une installation classique : c'est la dernière.
+À faire une seule fois par système. Comptez le temps d'une installation classique, c'est la dernière.
 
-Deux variantes, qui ne diffèrent qu'à l'étape 3.3 :
+Deux variantes, qui ne diffèrent qu'à l'étape 4.3.
 
-- **Modèle guestinfo (recommandé)** : un petit script est installé dans le modèle. Au démarrage de chaque clone, il lit la configuration que vazy a déposée de l'extérieur (nom d'hôte) et l'applique lui-même. vazy n'entre jamais dans la VM, **aucun identifiant nulle part, aucun compte privilégié**.
-- **Modèle classique (repli)** : pour un modèle que vous ne pouvez pas modifier. La personnalisation passe alors par un compte de l'invité que vazy utilise depuis l'hôte (`vazy template creds`). **Ce compte privilégié est cloné dans toutes vos VM**, y compris celles que vous posez sur un segment réseau pendant un TP de sécurité : c'est une mauvaise posture, réservez-la aux cas sans alternative.
+**Modèle guestinfo, recommandé.** Un petit script est installé dans le modèle. Au démarrage de chaque clone, il lit la configuration que vazy a déposée de l'extérieur et se configure lui-même. vazy n'entre jamais dans la VM : aucun identifiant nulle part, aucun compte privilégié cloné dans vos machines.
 
-### 3.1 Créer la VM dans VMware Workstation
+**Modèle classique, repli.** Pour un modèle que vous ne pouvez pas modifier. La personnalisation passe alors par un compte de l'invité que vazy utilise depuis l'hôte. Ce compte privilégié se retrouve dans **toutes** vos VM, y compris celles que vous posez sur un segment réseau pendant un TP de sécurité. Réservez cette variante aux cas sans alternative.
+
+### 4.1 Créer la VM dans VMware Workstation
 
 1. `File > New Virtual Machine`, mode `Typical`.
 2. Choisissez l'ISO d'installation.
-3. **Nom de la VM** : celui-ci deviendra l'alias du modèle, choisissez court et sans espace, par exemple `ubuntu-server`. **Emplacement** : un dossier dédié, par exemple `D:\VMs\ubuntu-server`.
-4. **Disque** : indiquez une taille maximale large (par exemple `200 GB`) et gardez `Store virtual disk as a single file`. Ne cochez **pas** « Allocate all disk space now » : le disque est dynamique, il ne consomme que ce qui est réellement écrit. C'est ce qui permet de ne jamais avoir à redimensionner.
-5. Matériel : laissez les valeurs par défaut. RAM, CPU et cartes réseau seront de toute façon redéfinis par vazy sur chaque clone.
+3. **Nom de la VM** : il deviendra l'alias du modèle. Court, sans espace, par exemple `ubuntu-server`. **Emplacement** : un dossier dédié, par exemple `D:\VMs\ubuntu-server`.
+4. **Disque** : donnez une taille maximale large, par exemple 200 Go, et gardez `Store virtual disk as a single file`. Ne cochez **pas** « Allocate all disk space now » : le disque est dynamique, il ne consomme que ce qui est réellement écrit. C'est ce qui permet de ne jamais avoir à le redimensionner ensuite.
+5. Matériel : laissez les valeurs par défaut. Mémoire, processeurs et cartes réseau seront redéfinis par vazy sur chaque clone.
 
-### 3.2 Installer et préparer le système
+### 4.2 Installer et préparer le système
 
 1. Installez le système normalement.
-2. Installez les outils d'intégration VMware :
-   - Ubuntu Server / Debian : `open-vm-tools` (l'installeur Ubuntu le fait souvent automatiquement ; sinon `sudo apt install open-vm-tools`).
+2. Installez les outils d'intégration, indispensables :
+   - Ubuntu Server, Debian : `sudo apt install open-vm-tools` (l'installeur Ubuntu le fait souvent tout seul).
    - Windows : menu `VM > Install VMware Tools`, puis lancez l'installation depuis le lecteur CD virtuel.
 
-   Sans ces outils, `vazy stop` ne peut pas demander un arrêt propre (il faudra `--hard`).
-3. Faites les mises à jour, installez ce que tous vos TP auront en commun (éditeur, SSH, etc.).
-4. Nettoyez : `sudo apt clean` sous Linux ; retirez l'ISO du lecteur CD virtuel (`VM > Settings > CD/DVD`, décochez `Connect at power on`).
+   Sans eux, `vazy stop` ne peut pas demander d'arrêt propre, et la personnalisation ne fonctionne pas.
+3. Faites les mises à jour, installez ce que tous vos TP auront en commun : éditeur, serveur SSH, outils réseau.
+4. Nettoyez : `sudo apt clean` sous Linux, et retirez l'ISO du lecteur CD virtuel (`VM > Settings > CD/DVD`, décochez `Connect at power on`).
 
-### 3.3 Variante guestinfo (recommandée) : installer le script d'auto-configuration
+### 4.3 Installer l'auto-configuration (variante recommandée)
 
 Les fichiers sont dans le dossier `invite` de vazy.
 
-**Linux (Ubuntu Server, Debian, tout système avec systemd)** : un seul fichier à transférer, `invite\linux\installer.sh`, qui contient le script et son unité systemd. Depuis Windows, avec l'adresse IP de la VM (`ip a` dedans) :
+**Linux, avec systemd.** Un seul fichier à transférer, `invite\linux\installer.sh`, qui contient le script et son unité systemd. Depuis Windows, avec l'adresse IP de la VM que vous obtenez par `ip a` dedans :
 
 ```
 scp "C:\Outils\vazy\invite\linux\installer.sh" etudiant@192.168.x.y:/tmp/
@@ -137,39 +193,39 @@ Puis dans la VM :
 sudo sh /tmp/installer.sh
 ```
 
-Ce que ça installe : `/usr/local/sbin/vazy-guestinfo` (script POSIX, sans dépendance) et `vazy-guestinfo.service`, une unité systemd lancée à chaque démarrage **avant le réseau**, qui :
+Ce que cela installe : `/usr/local/sbin/vazy-guestinfo`, un script POSIX sans dépendance, et `vazy-guestinfo.service`, une unité systemd lancée à chaque démarrage **avant le réseau**. À chaque démarrage, ce script :
 
-- lit `guestinfo.vazy_config` avec `vmtoolsd --cmd "info-get ..."` (open-vm-tools) ;
-- applique le nom d'hôte : `hostnamectl set-hostname` si D-Bus est déjà disponible, sinon écriture directe de `/etc/hostname`, ce qui revient au même, puis mise à jour de la ligne `127.0.1.1` de `/etc/hosts` ;
-- régénère les clés d'identité du serveur SSH et `/etc/machine-id` quand elles viennent d'une autre machine (l'UUID du BIOS change à chaque clone ; le script mémorise celui pour lequel il a généré les clés dans `/var/lib/vazy/identite.uuid`). Sans cela, tous les clones ont la même empreinte SSH, et deux clones Ubuntu demandent la même adresse au DHCP ;
-- ne fait rien si la variable est absente ou vide, ni si tout est déjà en place : idempotent, jamais de redémarrage.
+- lit la variable `guestinfo.vazy_config` avec `vmtoolsd --cmd "info-get ..."` ;
+- applique le nom d'hôte demandé, par `hostnamectl` si D-Bus répond déjà, sinon en écrivant directement `/etc/hostname`, puis met à jour la ligne `127.0.1.1` de `/etc/hosts` ;
+- régénère les clés d'identité du serveur SSH et `/etc/machine-id` lorsqu'elles proviennent d'une autre machine. L'identifiant matériel change à chaque clone, et le script mémorise celui pour lequel il a généré les clés dans `/var/lib/vazy/identite.uuid`. Sans cela, tous vos clones auraient la même empreinte SSH, et deux clones Ubuntu demanderaient la même adresse au serveur DHCP ;
+- ne fait rien si la variable est absente, vide, ou si tout est déjà en place. Il est idempotent et ne redémarre jamais la machine.
 
-Pas de `scp` possible ? Ouvrez `installer.sh` dans un éditeur sur Windows, collez son contenu dans la VM avec `cat > /tmp/installer.sh` puis `Ctrl+D`. Il doit rester en fins de ligne LF (c'est le cas du fichier livré).
+Pas de `scp` sous la main ? Ouvrez `installer.sh` dans un éditeur sur Windows, collez son contenu dans la VM avec `cat > /tmp/installer.sh` puis `Ctrl+D`. Le fichier livré est en fins de ligne LF, gardez-les.
 
-**Windows** : copiez le dossier `invite\windows` dans la VM (lecteur partagé, `scp` si OpenSSH est installé, ou clé USB), puis en administrateur :
+**Windows.** Copiez le dossier `invite\windows` dans la VM par un dossier partagé, `scp` ou une clé USB, puis en administrateur :
 
 ```
 powershell -ExecutionPolicy Bypass -File installer.ps1
 ```
 
-Ce que ça installe : `C:\ProgramData\vazy\vazy-guestinfo.ps1` et une tâche planifiée `vazy-guestinfo` lancée au démarrage sous le compte SYSTEM, qui lit la variable avec `vmtoolsd.exe`, applique `Rename-Computer` **sans redémarrer si le nom est déjà le bon**, redémarre une seule fois après un renommage effectif (Windows ne prend un nouveau nom qu'au redémarrage), et régénère les clés du serveur OpenSSH s'il est installé. Journal : `C:\ProgramData\vazy\vazy-guestinfo.log`. Le SID de la machine, lui, reste celui du modèle : seul `sysprep` le change, hors périmètre.
+Cela installe `C:\ProgramData\vazy\vazy-guestinfo.ps1` et une tâche planifiée `vazy-guestinfo` lancée au démarrage sous le compte SYSTEM. Elle lit la variable avec `vmtoolsd.exe`, applique `Rename-Computer` seulement si le nom diffère, redémarre une seule fois après un renommage effectif, puisque Windows ne prend un nouveau nom qu'au redémarrage, et régénère les clés du serveur OpenSSH s'il est installé. Son journal est dans `C:\ProgramData\vazy\vazy-guestinfo.log`. Le SID de la machine, lui, reste celui du modèle : seul `sysprep` le change, et c'est hors périmètre.
 
-Une fois le script installé, passez à l'étape 3.4.
+Passez ensuite à l'étape 4.5.
 
-### 3.3 bis Variante classique (repli) : un compte pour vazy
+### 4.4 Variante classique : un compte pour vazy
 
-Rien à installer dans le modèle, mais il faut un compte que vazy utilisera depuis l'hôte, après le démarrage, pour exécuter le renommage :
+Rien à installer dans le modèle, mais il faut un compte que vazy utilisera depuis l'hôte pour exécuter le renommage après le démarrage :
 
-- Linux : un compte pouvant faire `sudo` **sans mot de passe** (`echo "etudiant ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/vazy`), ou `root`.
-- Windows : le compte `Administrateur` intégré, activé, avec mot de passe (un administrateur ordinaire est bloqué par l'UAC, VMware ne l'élève pas).
+- Linux : un compte pouvant faire `sudo` **sans mot de passe**, ou `root`. Par exemple `echo "etudiant ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/vazy`.
+- Windows : le compte `Administrateur` intégré, activé, avec un mot de passe. Un administrateur ordinaire est bloqué par le contrôle de compte, que VMware ne sait pas contourner.
 
-Ce compte sera présent dans chaque clone. Après l'enregistrement du modèle (3.5) : `vazy template creds <alias>`.
+Ce compte sera présent dans chaque clone. Après l'enregistrement du modèle, déclarez-le avec `vazy template creds <alias>`.
 
-### 3.4 Vider ce qui mémorise la machine (Linux, obligatoire avant l'instantané)
+### 4.5 Nettoyer l'identité réseau (Linux, obligatoire)
 
-Un clone a de **nouvelles cartes réseau** (adresses MAC régénérées). Si le modèle a mémorisé l'ancienne carte, le clone se retrouve avec une interface qui ne correspond à rien et **n'a plus de réseau du tout**. Avant d'éteindre le modèle, vérifiez et nettoyez :
+Un clone reçoit de **nouvelles cartes réseau**, avec de nouvelles adresses matérielles. Si le modèle a mémorisé l'ancienne carte, le clone se retrouve avec une interface qui ne correspond à rien et **n'a plus de réseau du tout**. Avant d'éteindre le modèle, vérifiez ces six points.
 
-1. **netplan (Ubuntu)** : `cat /etc/netplan/*.yaml`. S'il contient `match: macaddress:` ou `set-name:`, la configuration est liée à la MAC du modèle. Remplacez le fichier par une configuration générique :
+1. **netplan, sur Ubuntu** : `cat /etc/netplan/*.yaml`. S'il contient `match: macaddress:` ou `set-name:`, la configuration est liée à la carte du modèle. Remplacez-la par une configuration générique :
 
    ```yaml
    network:
@@ -181,22 +237,27 @@ Un clone a de **nouvelles cartes réseau** (adresses MAC régénérées). Si le 
          dhcp4: true
    ```
 
-   Si le fichier s'appelle `50-cloud-init.yaml`, cloud-init le régénérera : désactivez sa gestion du réseau avec `sudo sh -c 'echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg'`.
-2. **Règles udev persistantes** (Debian ancien, autres) : `sudo rm -f /etc/udev/rules.d/70-persistent-net.rules`.
-3. **Fichiers `.link` systemd** liant un nom d'interface à une MAC : `ls /etc/systemd/network/*.link` ; supprimez ceux qui contiennent `MACAddress=`.
-4. **NetworkManager** (Debian bureau, Fedora) : dans `/etc/NetworkManager/system-connections/*.nmconnection`, retirez toute ligne `mac-address=`, ou supprimez les profils pour qu'il en recrée.
-5. **Baux DHCP** mémorisés : `sudo rm -f /var/lib/dhcp/*.leases /var/lib/NetworkManager/*.lease; sudo rm -rf /run/systemd/netif/leases`.
-6. **Identifiant machine** : `/etc/machine-id` sert d'identifiant DHCP à systemd-networkd. Le script guestinfo le régénère sur chaque clone ; pour un modèle classique, videz-le : `sudo truncate -s 0 /etc/machine-id` (systemd en génère un neuf au premier démarrage).
+   Si le fichier s'appelle `50-cloud-init.yaml`, cloud-init le régénérera au démarrage : désactivez sa gestion du réseau avec
 
-Vérification : `ip -br link` doit montrer une interface nommée `ens33` ou `ens160` ; c'est ce nom, issu de l'emplacement PCI, qui reste stable d'un clone à l'autre, contrairement à la MAC.
+   ```
+   sudo sh -c 'echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg'
+   ```
 
-Windows n'a pas ce problème pour le réseau ; le SID dupliqué est un autre sujet (sysprep), hors périmètre.
+2. **Règles udev persistantes**, sur les systèmes plus anciens : `sudo rm -f /etc/udev/rules.d/70-persistent-net.rules`.
+3. **Fichiers `.link` de systemd** qui lient un nom d'interface à une adresse matérielle : regardez `/etc/systemd/network/*.link` et supprimez ceux qui contiennent `MACAddress=`.
+4. **NetworkManager**, sur les systèmes de bureau : dans `/etc/NetworkManager/system-connections/*.nmconnection`, retirez toute ligne `mac-address=`, ou supprimez les profils pour qu'il en recrée.
+5. **Baux DHCP mémorisés** : `sudo rm -f /var/lib/dhcp/*.leases /var/lib/NetworkManager/*.lease` et `sudo rm -rf /run/systemd/netif/leases`.
+6. **Identifiant machine** : `/etc/machine-id` sert d'identifiant DHCP à systemd-networkd. Le script guestinfo le régénère sur chaque clone. Pour un modèle classique, videz-le : `sudo truncate -s 0 /etc/machine-id`, systemd en génère un neuf au premier démarrage.
 
-### 3.5 Éteindre, prendre l'instantané, enregistrer le modèle
+Vérification : `ip -br link` doit montrer une interface nommée `ens33` ou `ens160`. Ce nom vient de l'emplacement matériel et reste stable d'un clone à l'autre, contrairement à l'adresse MAC.
 
-**Éteignez la VM proprement, depuis l'intérieur du système.** Puis, VM éteinte, dans VMware Workstation : `VM > Snapshot > Take Snapshot...`, nommez-le `base`, validez.
+Windows n'a pas ce problème de réseau. Le SID dupliqué est un autre sujet, traité par `sysprep`, hors périmètre.
 
-Ou en ligne de commande :
+### 4.6 Éteindre, l'instantané, l'enregistrement
+
+**Éteignez la VM proprement, depuis l'intérieur du système.** Puis, VM éteinte, dans VMware Workstation : `VM > Snapshot > Take Snapshot...`, nommez-le `base`.
+
+En ligne de commande, au choix :
 
 ```
 "C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe" -T ws snapshot "D:\VMs\ubuntu-server\ubuntu-server.vmx" base
@@ -206,41 +267,43 @@ Enregistrez le modèle dans vazy :
 
 ```
 vazy template add "D:\VMs\ubuntu-server\ubuntu-server.vmx"
-vazy template mark ubuntu-server --guestinfo        (variante guestinfo uniquement)
+vazy template mark ubuntu-server --guestinfo
 ```
 
-- L'alias par défaut est le nom du fichier sans extension (`ubuntu-server`). Pour en choisir un autre : `--name <alias>`.
-- Si la VM a plusieurs instantanés, le dernier de la liste est utilisé ; pour en imposer un : `--snapshot <nom>`.
-- vazy refuse d'enregistrer une VM sans instantané et explique comment en créer un.
-- vazy pose un fichier témoin à côté de la VM (`ubuntu-server.vmx.vazy-modele`). Tant qu'il existe, vazy refuse de démarrer, supprimer ou modifier les instantanés de cette VM, même par erreur de manipulation du catalogue.
-- `template mark --guestinfo` dit à vazy que le script est dans le modèle : dès lors, `--hostname` et la clé `hostname` des labos passent par le dépôt de configuration, sans identifiant. `vazy template list` affiche la méthode de chaque modèle.
+La seconde ligne ne concerne que la variante recommandée. Quelques précisions :
 
-C'est terminé. **Ne redémarrez plus jamais cette VM.** Créez vos machines de TP :
+- L'alias par défaut est le nom du fichier sans extension. Pour en choisir un autre, `--name <alias>`.
+- Si la VM a plusieurs instantanés, le dernier de la liste est retenu ; `--snapshot <nom>` en impose un.
+- vazy refuse une VM sans instantané, et explique comment en créer un.
+- vazy pose un fichier témoin à côté du modèle, `ubuntu-server.vmx.vazy-modele`. Tant qu'il existe, vazy refuse de démarrer, supprimer ou modifier les instantanés de cette VM, même si le catalogue est perdu ou modifié à la main.
+- `template mark --guestinfo` indique que le script est installé. Dès lors, `--hostname` passe par le dépôt de configuration, sans identifiant. `vazy template list` affiche la méthode retenue pour chaque modèle.
+
+C'est terminé. **Ne redémarrez plus jamais cette VM.** Créez vos machines :
 
 ```
 vazy ubuntu-server --hostname web1
 ```
 
-### 3.6 Mettre à jour un modèle (procédure d'exception)
+### 4.7 Mettre à jour un modèle
 
-Si un jour vous devez modifier le modèle (nouvelle version d'un paquet, par exemple), voici la seule façon sûre :
+Si vous devez modifier le modèle, par exemple pour une nouvelle version d'un paquet, voici la seule façon sûre.
 
 1. Démarrez le modèle dans VMware Workstation, faites les modifications, éteignez-le proprement.
-2. Prenez un **nouvel** instantané (`base-2`). **Ne supprimez pas l'ancien** tant qu'un clone en dépend.
-3. Ré-enregistrez le modèle sur le nouvel instantané :
+2. Prenez un **nouvel** instantané, `base-2`. **Ne supprimez pas l'ancien** tant qu'un clone en dépend.
+3. Ré-enregistrez le modèle sur ce nouvel instantané :
 
    ```
    vazy template rm ubuntu-server
    vazy template add "D:\VMs\ubuntu-server\ubuntu-server.vmx" --snapshot base-2
    ```
 
-Les anciens clones continuent d'utiliser `base`, les nouveaux partent de `base-2`.
+Les anciens clones continuent d'utiliser `base`, les nouveaux partent de `base-2`. Le jour où plus aucun clone ne dépend de `base`, vous pouvez le supprimer dans VMware ; `vazy doctor` vous dit combien de clones dépendent de chaque modèle.
 
 ---
 
-## 4. Utilisation
+## 5. Créer et gérer des VM
 
-### La commande principale
+### 5.1 La commande principale
 
 ```
 vazy <modele> [options]
@@ -250,17 +313,18 @@ Crée un clone lié du modèle, applique les options, démarre la VM. Toutes les
 
 | Option | Rôle | Défaut |
 |---|---|---|
-| `--name <nom>` | Nom de la VM (lettres, chiffres, `.`, `-`, `_` ; il sert aussi de nom de dossier) | `<modele>-1`, `<modele>-2`, ... |
+| `--name <nom>` | Nom de la VM. Lettres, chiffres, `.`, `-`, `_` ; il sert aussi de nom de dossier | `<modele>-1`, `<modele>-2`, ... |
 | `--ram <Go>` | Mémoire en Go, décimales acceptées (`1.5`, `0.5`) | `2` |
 | `--cpu <n>` | Nombre de cœurs | `2` |
-| `--reseau <n>` | Nombre de cartes réseau (`0` = aucune) | `1` |
-| `--mode <m>` | Type de réseau : `nat`, `bridged`, `hostonly` ; un mode par carte en répétant l'option | `nat` |
-| `--set <cle>=<valeur>` | Écrit une ligne brute dans la configuration de la VM ; répétable ; appliqué après les autres options | |
+| `--reseau <n>` | Nombre de cartes réseau, `0` pour aucune | `1` |
+| `--mode <m>` | `nat`, `bridged` ou `hostonly`, un mode par carte en répétant l'option | `nat` |
+| `--set <cle>=<valeur>` | Écrit une ligne brute dans la configuration de la VM, répétable | |
 | `--nogui` | Démarre sans ouvrir de fenêtre VMware | désactivé |
 | `--nostart` | Crée sans démarrer | désactivé |
-| `--tmp` | VM éphémère : supprimée automatiquement dès qu'elle est trouvée éteinte (voir plus bas) ; incompatible avec `--nostart` | désactivé |
-| `--hostname <nom>` | Nom d'hôte appliqué dans l'invité après le démarrage (voir « Personnalisation de l'invité ») | aucun |
-| `--vnc` | Écran de la VM accessible à distance (voir « Piloter et voir ses VM à distance ») ; `--vnc off` pour l'état par défaut | désactivé |
+| `--tmp` | VM éphémère, supprimée dès qu'elle est trouvée éteinte. Incompatible avec `--nostart` | désactivé |
+| `--hostname <nom>` | Nom d'hôte appliqué dans l'invité à chaque démarrage | aucun |
+| `--vnc` | Écran accessible à distance ; `--vnc off` pour l'état par défaut | désactivé |
+| `--dry-run` | N'exécute rien, montre ce qui serait fait | désactivé |
 
 Exemples :
 
@@ -272,79 +336,68 @@ vazy ubuntu-server --reseau 3 --mode bridged
 vazy ubuntu-server --set svga.autodetect=FALSE --set usb.present=TRUE
 ```
 
-Réseau : avec `--mode nat --mode hostonly`, la première carte est en NAT et la seconde en host-only (le classique « internet + réseau de labo »). Si `--reseau` demande plus de cartes que de modes, les cartes supplémentaires reprennent le dernier mode indiqué. La forme `--mode "nat,hostonly"` fonctionne aussi, mais **sous PowerShell les guillemets sont obligatoires**, sinon la virgule sépare les arguments. Même remarque pour `--ram "1,5"` : préférez `--ram 1.5`.
+### 5.2 Le réseau
 
-Ce que vous voyez pendant la création :
+Trois modes, qui correspondent aux réseaux virtuels standards de VMware.
+
+| Mode | Réseau VMware | Ce que ça donne |
+|---|---|---|
+| `nat` | VMnet8 | La VM sort vers internet à travers l'hôte, invisible depuis le réseau local |
+| `bridged` | VMnet0 | La VM est sur votre réseau local comme une machine physique, avec sa propre adresse |
+| `hostonly` | VMnet1 | Réseau fermé entre les VM et l'hôte, sans accès à internet |
+
+Avec `--mode nat --mode hostonly`, la première carte est en NAT et la seconde en host-only : c'est le classique « internet plus réseau de labo ». Si `--reseau` demande plus de cartes que de modes déclarés, les cartes supplémentaires reprennent le dernier mode.
+
+**Piège PowerShell.** La forme `--mode "nat,hostonly"` fonctionne, mais les guillemets sont obligatoires, sinon PowerShell découpe sur la virgule et vazy reçoit deux arguments séparés. Même chose pour la mémoire : écrivez `--ram 1.5` avec un point, ou `--ram "1,5"` avec des guillemets.
+
+Toutes les machines en `hostonly` partagent le même segment. Deux labos montés en même temps en host-only se voient donc mutuellement. Les segments personnalisés VMnet2 et suivants sont [hors périmètre](#17-limites-connues).
+
+### 5.3 Ce que vous voyez
 
 ```
 vazy : création d'une VM depuis le modèle « ubuntu-server »
-[1/5] Vérifications
+[1/6] Vérifications
       modèle « ubuntu-server » (instantané « base »), destination D:\VMs\TP14, 214,3 Go libres
-[2/5] Clonage lié
+[2/6] Clonage lié
       D:\VMs\TP14\TP14.vmx créé en 6,8 s
-[3/5] Réglages
+[3/6] Réglages
       4 Go de RAM (4096 Mo), 2 CPU
-[4/5] Réseau
+[4/6] Réseau
       1 carte : nat
-[5/5] Démarrage
-      VM démarrée en 4,1 s
+[5/6] Point de retour « vazy-neuf »
+      instantané pris en 1,2 s (retour à cet état : vazy reset TP14)
+[6/6] Démarrage
+      VM « TP14 » démarrée en 4,1 s
 
 VM « TP14 » prête et démarrée en 12,4 s.
   dossier : D:\VMs\TP14
   arrêter : vazy stop TP14     supprimer : vazy rm TP14
 ```
 
-### Les commandes secondaires
+### 5.4 Le cycle de vie
 
-| Commande | Rôle |
+| Commande | Effet |
 |---|---|
-| `vazy list` | VM créées par vazy, avec leur état (`en marche`, `arrêtée`, `absente` si les fichiers ont disparu) |
-| `vazy start <nom> [--nogui]` | Démarre une VM |
-| `vazy stop <nom> [--hard]` | Arrêt propre via les outils VMware ; `--hard` coupe le courant |
-| `vazy rm <nom> [--yes]` | Supprime la VM et tous ses fichiers, après confirmation (`--yes` pour la sauter) ; arrêt forcé si elle tourne |
-| `vazy reset <nom> [--nostart] [--nogui]` | Remet la VM à neuf : retour à l'instantané `vazy-neuf`, puis redémarrage (voir ci-dessous) |
-| `vazy snap <nom> [libelle]` | Instantané manuel |
-| `vazy snaps <nom>` | Liste les instantanés |
-| `vazy back <nom> <libelle> [--nostart] [--nogui]` | Retour à un instantané manuel, puis redémarrage |
-| `vazy unsnap <nom> <libelle> [--yes]` | Supprime un instantané manuel, après confirmation |
-| `vazy gc [--yes]` | Supprime les VM éphémères éteintes (le nettoyage se fait aussi tout seul au début de chaque commande) |
-| `vazy vnc <nom> [off]` | Affiche le lien pour voir l'écran de la VM à distance ; l'active si besoin |
-| `vazy doctor` | Diagnostic complet : hyperviseur, disque, modèles, VM, cohérence catalogue / disque |
-| `vazy freeze <nom> [--yes]` | Convertit un clone lié en VM complète : elle ne dépend plus du modèle |
-| `vazy lab up <nom> [--vm nom:modele:ram] ... [--save]` | Monte un labo décrit en une ligne, ou remonte un labo enregistré ; `--save` garde la recette |
-| `vazy lab new <nom>` | Assistant : questions une par une, puis écriture du fichier |
-| `vazy lab status <nom>` | État de chaque machine du labo |
-| `vazy lab down <nom> [--yes] [--stop-only] [--hard]` | Arrête et supprime le labo, après confirmation ; `--stop-only` arrête sans supprimer |
-| `vazy lab export <fichier.json> --labo <nom>\|--prefixe <p>\|--vms a,b,c [--requis]` | Génère le fichier de labo qui recréerait des VM existantes |
-| `vazy template alias <alias> <nom standard> [--rm]` | Fait répondre votre modèle à un nom standard, pour monter un labo partagé |
-| `vazy template add <chemin.vmx> [--name <alias>] [--snapshot <nom>]` | Enregistre un modèle (le dossier de la VM est accepté à la place du `.vmx`) |
-| `vazy template list` | Modèles enregistrés, instantané utilisé, nombre de clones |
-| `vazy template rm <alias>` | Retire un modèle du catalogue ; **aucun fichier n'est supprimé** |
-| `vazy template mark <alias> --guestinfo\|--classique` | Déclare que le modèle embarque le script `vazy-guestinfo` : personnalisation sans identifiant |
-| `vazy template creds <alias> [--user <nom>] [--os linux\|windows] [--rm]` | Repli pour un modèle non modifiable : identifiants d'un compte de l'invité (mot de passe saisi masqué, stocké chiffré) |
-| `vazy config [<cle> <valeur>]` | Affiche ou modifie la configuration |
-| `vazy help`, `vazy version` | |
+| `vazy list` | Les VM créées par vazy, avec leur état, leur modèle, leur labo et leur écran distant |
+| `vazy start <nom> [--nogui]` | Démarre |
+| `vazy stop <nom> [--hard]` | Arrêt propre par les outils invité ; `--hard` coupe le courant |
+| `vazy rm <nom> [--yes]` | Supprime la VM et tous ses fichiers, après confirmation ; arrêt forcé si elle tourne |
 
-Codes de retour : `0` succès, `1` erreur, `2` erreur de syntaxe.
+Les états affichés par `vazy list` : `en marche`, `arrêtée`, ou `absente` quand les fichiers ont disparu du disque en dehors de vazy.
 
-**Option générale `--dry-run`** : n'exécute rien, affiche en magenta les commandes `vmrun` exactes qui seraient lancées et les lignes qui seraient écrites dans la configuration des VM. Les lectures (état des VM, instantanés, espace disque) ont bien lieu, sinon il n'y aurait rien à décider. Ni le catalogue ni les fichiers ne sont touchés. Utile pour vérifier avant une opération destructrice, et pour apprendre `vmrun` :
+vazy n'écrase jamais rien. Un nom déjà pris ou un dossier déjà présent produit un refus, pas un remplacement silencieux.
 
-```
-vazy ubuntu-server --name TP20 --ram 4 --dry-run
-vazy lab down tp14-ad.json --yes --dry-run
-```
+---
 
-**Journal** : chaque opération est enregistrée dans `%LOCALAPPDATA%\vazy\journal.log`, avec la ligne de commande vazy, chaque commande `vmrun` lancée (mot de passe remplacé par `***`), son code de retour, sa durée, et chaque écriture dans un fichier de configuration de VM. Le fichier tourne tout seul au-delà de 2 Mo. C'est le premier endroit à regarder quand quelque chose s'est mal passé.
+## 6. Remise à zéro et instantanés
 
-### Remise à zéro et instantanés
-
-Un TP, on le casse. Plutôt que de recréer la VM, on revient en arrière :
+Un TP, par définition, on le casse. Plutôt que de recréer la VM :
 
 ```
 vazy reset TP14
 ```
 
-Juste après la création d'une VM, avant son premier démarrage, vazy prend automatiquement un instantané nommé `vazy-neuf`. `vazy reset` y revient : la VM est arrêtée si elle tourne, ramenée à l'état neuf, puis redémarrée. L'instantané ayant été pris machine éteinte, il n'y a aucun état mémoire à restaurer : le retour prend quelques secondes.
+Juste après la création d'une VM, avant son premier démarrage, vazy prend automatiquement un instantané nommé `vazy-neuf`. `vazy reset` y revient : la VM est arrêtée si elle tourne, ramenée à l'état neuf, puis redémarrée. L'instantané ayant été pris machine éteinte, il n'y a aucun état mémoire à restaurer et le retour prend quelques secondes.
 
 ```
 vazy : remise à zéro de « TP14 »
@@ -353,30 +406,32 @@ vazy : remise à zéro de « TP14 »
 [2/3] Retour à l'instantané « vazy-neuf »
       terminé en 1,8 s
 [3/3] Démarrage
-      VM démarrée en 3,4 s
+      VM « TP14 » démarrée en 3,4 s
 
 VM « TP14 » remise à neuf et redémarrée en 5,6 s.
 ```
 
-Pourquoi un arrêt forcé plutôt qu'un arrêt propre ? Parce que tout ce qui s'est passé depuis l'instantané est abandonné de toute façon par le retour : un arrêt propre ne protégerait rien et coûterait 10 à 30 secondes de plus.
+Pourquoi un arrêt forcé plutôt qu'un arrêt propre ? Parce que tout ce qui s'est passé depuis l'instantané est de toute façon abandonné par le retour. Un arrêt propre ne protégerait rien et coûterait dix à trente secondes de plus.
 
 Pour jalonner un TP long :
 
-| Commande | Rôle |
+| Commande | Effet |
 |---|---|
-| `vazy snap TP14 avant-dhcp` | Instantané manuel (sans libellé : `snap-<date>-<heure>`) |
+| `vazy snap TP14 avant-dhcp` | Instantané manuel. Sans libellé : `snap-<date>-<heure>` |
 | `vazy snaps TP14` | Liste les instantanés et leur rôle |
-| `vazy back TP14 avant-dhcp` | Revient à cet instantané puis redémarre (`--nostart` pour ne pas redémarrer) |
+| `vazy back TP14 avant-dhcp` | Revient à cet instantané puis redémarre ; `--nostart` pour ne pas redémarrer |
 | `vazy unsnap TP14 avant-dhcp` | Supprime l'instantané, après confirmation |
 
-Règles :
+Quelques règles :
 
-- `vazy-neuf` est protégé : `snap` refuse de l'écraser, `unsnap` refuse de le supprimer.
-- Un instantané pris VM en marche inclut la mémoire : plus long à prendre, et `back` ramène la VM en marche dans cet état. Pour un jalon léger, prenez-le VM éteinte.
-- Les instantanés d'un **modèle** ne sont jamais touchés. `template add` pose un fichier témoin à côté du modèle (`<modele>.vmx.vazy-modele`) ; tant qu'il existe, le pilote refuse lui-même de démarrer, supprimer ou prendre un instantané de cette VM, quel que soit l'état du catalogue. `template rm` le retire.
-- VM créées avant cette version : elles n'ont pas de `vazy-neuf`. Pour l'ajouter une fois, VM éteinte et dans l'état que vous voulez retrouver : `vazy stop TP14` puis `vazy snap TP14 vazy-neuf`. C'est le seul cas où `snap` accepte ce libellé.
+- `vazy-neuf` est protégé. `snap` refuse de l'écraser, `unsnap` refuse de le supprimer.
+- Un instantané pris VM en marche inclut la mémoire : plus long à prendre, et `back` ramènera la VM en marche dans cet état. Pour un jalon léger, prenez-le VM éteinte.
+- Les instantanés d'un **modèle** ne sont jamais touchés par ces commandes. Le pilote refuse toute opération d'instantané sur une machine marquée modèle.
+- Une VM créée avant la version 1.1 n'a pas de `vazy-neuf`. Pour l'ajouter une fois, VM éteinte et dans l'état que vous voulez retrouver : `vazy stop TP14` puis `vazy snap TP14 vazy-neuf`. C'est le seul cas où `snap` accepte ce libellé.
 
-### VM éphémères
+---
+
+## 7. VM éphémères
 
 Je teste une commande, j'éteins, il ne reste rien :
 
@@ -384,9 +439,11 @@ Je teste une commande, j'éteins, il ne reste rien :
 vazy ubuntu-server --tmp
 ```
 
-La VM s'appelle `ubuntu-server-tmp-1`, est créée et démarrée comme les autres, puis marquée **éphémère** dans le catalogue (`vazy list` l'affiche avec `oui` dans la colonne TMP). Dès qu'elle est trouvée éteinte, elle est supprimée, fichiers compris. Aucun service en arrière-plan : le nettoyage est paresseux.
+La VM s'appelle `ubuntu-server-tmp-1`, se crée et démarre comme les autres, puis est marquée **éphémère** dans le catalogue. `vazy list` l'affiche avec `oui` dans la colonne TMP. Dès qu'elle est trouvée éteinte, elle est supprimée, fichiers compris.
 
-1. **Au début de chaque commande vazy**, quelle qu'elle soit, l'outil regarde s'il existe des VM éphémères au catalogue. S'il n'y en a pas, cela ne coûte rien (aucun appel à VMware). S'il y en a, il interroge leur état et supprime celles qui sont éteintes, en l'annonçant sur une ligne par VM.
+Il n'y a aucun service en arrière-plan : le nettoyage est **paresseux**.
+
+1. Au début de chaque commande vazy, quelle qu'elle soit, l'outil regarde s'il existe des VM éphémères au catalogue. S'il n'y en a pas, cela ne coûte rien, aucun appel à VMware. S'il y en a, il interroge leur état et supprime celles qui sont éteintes, une ligne par VM.
 2. `vazy stop <nom>` sur une VM éphémère la supprime dans la foulée.
 3. `vazy gc` lance le nettoyage à la demande et dit ce qu'il a fait.
 
@@ -396,59 +453,62 @@ vazy list
 NOM   ÉTAT   ...
 ```
 
-Garde-fous :
+Les garde-fous :
 
-- Une VM qui n'est pas marquée éphémère n'est **jamais** supprimée par le nettoyage, quel que soit son état. La fonction de suppression refuse elle-même toute VM non marquée.
-- Le marquage n'est posé qu'une fois la VM démarrée. Si le démarrage échoue, la VM reste une VM normale (à examiner, puis `vazy rm`). Cela évite aussi qu'une commande vazy lancée dans un autre terminal pendant le démarrage ne la prenne pour une VM éteinte.
-- Au-delà de 3 VM éphémères à supprimer d'un coup, vazy demande confirmation : c'est probablement le signe d'une anomalie. Sans console interactive, rien n'est supprimé ; relancez `vazy gc --yes` après vérification.
+- Une VM non marquée éphémère n'est **jamais** supprimée par le nettoyage, quel que soit son état. La fonction de suppression refuse elle-même toute VM non marquée, indépendamment de l'appelant.
+- Le marquage n'est posé qu'une fois la VM démarrée avec succès. Si le démarrage échoue, la VM reste une VM ordinaire, à examiner puis à supprimer à la main. Cela évite aussi qu'une commande vazy lancée dans un autre terminal pendant le démarrage ne la prenne pour une VM éteinte.
+- Au-delà de trois VM éphémères à supprimer d'un coup, vazy demande confirmation : c'est probablement le signe d'une anomalie. Sans console interactive, rien n'est supprimé et le message renvoie vers `vazy gc --yes`.
 - `--tmp` et `--nostart` sont incompatibles : une VM éphémère créée éteinte serait supprimée au lancement suivant.
 
-Ce qu'il faut savoir sur VMware Workstation : fermer la fenêtre d'une VM en marche ne l'éteint pas forcément. Selon la préférence `Edit > Preferences > Workspace`, la VM continue de tourner en arrière-plan. Une VM éphémère qui tourne encore n'est pas supprimée. Pour être sûr : éteignez-la depuis l'intérieur (`shutdown`, `poweroff`), ou `vazy stop <nom>`, qui l'arrête proprement et la supprime.
+**À savoir sur VMware Workstation** : fermer la fenêtre d'une VM ne l'éteint pas forcément. Selon la préférence `Edit > Preferences > Workspace`, elle continue de tourner en arrière-plan, et une éphémère qui tourne n'est pas supprimée. Pour en être sûr, éteignez depuis l'intérieur, ou utilisez `vazy stop`.
 
-### Monter un labo
+---
 
-Un labo est un TP entier : plusieurs VM créées, réglées et démarrées ensemble, dans le bon ordre. Trois façons de le décrire, du plus rapide au plus complet.
+## 8. Les labos : monter un TP entier
 
-**En une ligne.** C'est la façon normale :
+Un labo, c'est plusieurs VM créées, réglées et démarrées ensemble, dans le bon ordre. Trois façons de le décrire.
+
+### 8.1 En une ligne
+
+C'est la façon normale :
 
 ```
 vazy lab up tp14 --vm dc01:win2022:4 --vm srv01:win2022:2 --vm client:win11:4 --save
 ```
 
-Chaque `--vm` décrit une machine, au format `nom:modele:ram`, avec un quatrième champ facultatif pour le nombre de cœurs (`dc01:win2022:4:2`). La RAM peut être omise (`dc01:win2022`), la valeur par défaut ou celle de `--ram` s'applique alors.
+Chaque `--vm` décrit une machine au format `nom:modele:ram`, avec un quatrième champ facultatif pour le nombre de cœurs, `dc01:win2022:4:2`. La mémoire peut être omise, `dc01:win2022`, la valeur par défaut ou celle de `--ram` s'applique alors.
 
 Les options générales valent pour **toutes** les machines du labo : `--mode`, `--vnc`, `--cpu`, `--ram`, `--nogui`, `--set`, `--delai`. Le nom de chaque machine lui sert aussi de nom d'hôte, et les machines démarrent dans l'ordre où vous les avez écrites, avec le délai entre chacune.
 
-**`--save` garde la recette.** vazy monte le labo, puis écrit le fichier qui correspond aux VM réellement créées. La semaine suivante, une seule commande suffit :
+### 8.2 `--save` : garder la recette
+
+vazy monte le labo, puis écrit le fichier correspondant aux VM réellement créées. La semaine suivante, une seule commande :
 
 ```
 vazy lab up tp14
 ```
 
-vazy retrouve le fichier tout seul, où que vous soyez : il cherche `tp14` puis `tp14.json` dans le dossier courant, puis dans son dossier de labos (`%LOCALAPPDATA%\vazy\labos`, réglable avec `dossierLabos`). C'est ce qui permet de remonter un TP depuis une session SSH sans se soucier du répertoire courant. Si le fichier existe déjà, vazy demande confirmation avant de le remplacer.
+vazy retrouve le fichier tout seul, où que vous soyez : il cherche `tp14`, puis `tp14.json` dans le dossier courant, puis dans son dossier de labos, `%LOCALAPPDATA%\vazy\labos`, réglable par `dossierLabos`. C'est ce qui permet de remonter un TP depuis une session SSH sans se soucier du répertoire courant.
 
-**L'assistant**, pour un labo compliqué ou quand vous ne connaissez pas encore les options :
+Deux choses à savoir. `--save` n'enregistre que les machines de la commande : si d'autres VM sont rattachées au même labo, vazy le signale et les laisse en place, et `lab down` les démontera quand même. Et il ne mémorise pas `--nogui`, qui décrit une façon de démarrer plutôt que la machine ; au remontage, les VM s'ouvriront en fenêtre. Ajoutez `"nogui": true` au fichier si vous les voulez toujours sans fenêtre.
+
+Si le fichier existe déjà, vazy demande confirmation avant de le remplacer.
+
+### 8.3 L'assistant
+
+Pour un labo compliqué, ou quand vous ne connaissez pas encore les options :
 
 ```
 vazy lab new tp14
 ```
 
-Les questions viennent une par une, avec une valeur par défaut entre crochets : nombre de machines, délai, puis pour chacune son nom, son modèle choisi dans la liste affichée, sa RAM, ses cœurs, son réseau, son écran distant, et si elle doit démarrer après la précédente. Le fichier est écrit à la fin ; rien n'est monté. L'assistant refuse de s'exécuter hors d'un terminal interactif.
+Les questions viennent une par une, avec une valeur par défaut entre crochets : nombre de machines, délai entre démarrages, puis pour chacune son nom, son modèle choisi dans la liste affichée, sa mémoire, ses cœurs, son réseau, son écran distant, et si elle doit démarrer après la précédente. Le fichier est écrit à la fin, rien n'est monté. L'assistant refuse de s'exécuter hors d'un terminal interactif.
 
-**Le fichier reste le format de stockage, jamais une saisie.** Vous le récoltez avec `--save`, `lab new` ou `lab export`, vous ne l'écrivez pas à la main.
+**Le fichier JSON est un résultat, jamais une saisie.** Vous le récoltez avec `--save`, `lab new` ou `lab export`.
 
-Deux choses à savoir sur `--save`. Il n'enregistre que les machines de la commande : si d'autres VM sont rattachées au même labo, vazy le signale et les laisse en place, et `lab down` les démontera quand même. Et il ne mémorise pas `--nogui`, qui décrit une façon de démarrer plutôt que la machine elle-même. Au remontage, les VM s'ouvrent donc dans une fenêtre ; ajoutez `"nogui": true` au fichier si vous les voulez toujours sans fenêtre.
+### 8.4 Le fichier de labo
 
-Les autres commandes acceptent indifféremment le nom du labo ou le chemin d'un fichier :
-
-```
-vazy lab status tp14
-vazy lab down tp14
-```
-
-### Le fichier de labo
-
-Le format est du JSON (PowerShell le lit nativement ; pas de YAML, qui demanderait une dépendance). Vous n'avez normalement pas à l'écrire, mais le relire est utile, et le modifier reste possible. Exemple complet, fourni dans `exemples\tp14-ad.json` :
+Le format est du JSON, que PowerShell lit nativement. Pas de YAML, qui demanderait une dépendance. Vous n'avez normalement pas à l'écrire, mais le relire est utile et le modifier reste possible.
 
 ```json
 {
@@ -463,35 +523,34 @@ Le format est du JSON (PowerShell le lit nativement ; pas de YAML, qui demandera
 }
 ```
 
-Clés du labo :
+Clés au niveau du labo :
 
 | Clé | Rôle | Défaut |
 |---|---|---|
-| `labo` | Nom du labo, préfixe de toutes ses VM (32 caractères max, sans espace ni accent) | nom du fichier sans `.json` |
-| `delai` | Secondes d'attente entre deux démarrages, pour ne pas lancer trois Windows dans la même seconde | `5` |
-| `requis` | Modèles attendus, vérifiés avant toute action (labo partagé) | aucun |
-| `machines` | Une entrée par machine : la clé est le nom court de la machine | |
+| `labo` | Nom du labo, préfixe de toutes ses VM. 32 caractères, sans espace ni accent | nom du fichier |
+| `delai` | Secondes d'attente entre deux démarrages | `5` |
+| `requis` | Modèles attendus, vérifiés avant toute action. Voir [partager un labo](#9-partager-un-labo) | aucun |
+| `machines` | Une entrée par machine, la clé étant son nom court | |
 
-Chaque machine accepte **exactement les mêmes clés que les options de création**, sans les tirets : `modele` (obligatoire), `ram`, `cpu`, `reseau`, `mode`, `set`, `nogui`, `nostart`, `hostname`. Plus une clé propre au labo : `apres`, la ou les machines qui doivent être démarrées avant celle-ci. Détails de forme :
+Chaque machine accepte **exactement les mêmes clés que les options de création**, sans les tirets : `modele` qui est obligatoire, `ram`, `cpu`, `reseau`, `mode`, `set`, `nogui`, `nostart`, `hostname`, `vnc`. Plus une clé propre au labo, `apres`, qui déclare les machines à démarrer avant celle-ci.
 
-- `mode` : une chaîne (`"hostonly"`, `"nat,hostonly"`) ou une liste (`["nat", "hostonly"]`), un mode par carte comme en ligne de commande.
+Détails de forme :
+
+- `mode` : une chaîne (`"hostonly"`, `"nat,hostonly"`) ou une liste (`["nat", "hostonly"]`).
 - `set` : un objet `{ "cle": "valeur", ... }` ou une liste `[ "cle=valeur", ... ]`.
-- `apres` : une chaîne ou une liste de noms de machines du fichier.
-- `nogui`, `nostart` : `true` ou `false`.
-- `hostname` : nom d'hôte appliqué dans l'invité (voir « Personnalisation de l'invité »). **Par défaut, le nom court de la machine** (`dc01`). `false` ou `""` pour ne rien appliquer. Sans méthode de personnalisation sur le modèle, la clé est ignorée avec une ligne d'information.
-- `vnc` : `true` pour rendre l'écran de cette machine accessible à distance (voir « Piloter et voir ses VM à distance »).
-- Une clé inconnue (faute de frappe, `tmp`, `name`) est refusée avant toute action.
+- `apres` : une chaîne ou une liste de noms de machines du même fichier.
+- `nogui`, `nostart`, `vnc` : `true` ou `false`.
+- `hostname` : le nom d'hôte, **par défaut le nom court de la machine**. `false` ou `""` pour ne rien appliquer.
+- Une clé inconnue, y compris une faute de frappe ou `tmp`, est refusée avant toute action.
 
-Au niveau du labo, la clé `requis` déclare les modèles attendus ; elle est vérifiée avant toute action (voir « Exporter un labo, partager un labo »).
-
-Comportement :
+### 8.5 Comportement
 
 - **Nommage préfixé** : la machine `dc01` du labo `tp14-ad` devient la VM `tp14-ad-dc01`. Deux labos ne se marchent jamais dessus, et `vazy list` affiche le labo de chaque VM.
-- **Validation avant action** : modèles inconnus, dépendances circulaires, `apres` vers une machine inexistante, nom déjà pris par une VM hors labo, espace disque pour l'ensemble des VM à créer. Si une vérification échoue, aucune VM n'est créée.
-- **Idempotence** : relancer `lab up` ne recrée pas ce qui existe. Les VM manquantes sont créées, les éteintes sont démarrées, celles qui tournent sont laissées tranquilles. Une VM dont les fichiers ont disparu est recréée. Modifier la RAM ou le réseau d'une machine dans le fichier ne change pas une VM déjà créée : supprimez-la (`vazy rm`) ou démontez le labo, puis relancez `lab up`.
-- **Ordre de démarrage** : d'abord toutes les créations, puis les démarrages dans l'ordre des dépendances (`apres`), avec `delai` secondes entre deux démarrages. vazy ne sait pas quand un système a fini de démarrer : `apres` garantit l'ordre et le délai, pas que le contrôleur de domaine répond déjà.
-- `lab status` : tableau par machine avec l'état `en marche`, `arrêtée`, `à créer`, `absente` (fichiers disparus) ou `hors labo` (le nom est pris par une VM qui n'appartient pas à ce labo). Les VM du catalogue rattachées au labo mais retirées du fichier apparaissent en `(hors fichier)` et sont démontées avec le reste.
-- `lab down` : arrêt de toutes les VM dans l'ordre inverse du démarrage, puis suppression, après confirmation (`--yes` pour la sauter). `--stop-only` arrête proprement sans supprimer, avec repli en arrêt forcé si les outils de l'invité ne répondent pas ; `--hard` force d'emblée.
+- **Validation avant action** : modèles inconnus, prérequis manquants, dépendances circulaires, `apres` vers une machine inexistante, nom déjà pris par une VM hors labo, espace disque pour l'ensemble. Si une vérification échoue, **aucune VM n'est créée**.
+- **Idempotence** : relancer `lab up` ne recrée pas ce qui existe. Les VM manquantes sont créées, les éteintes démarrées, celles qui tournent laissées tranquilles. Une VM dont les fichiers ont disparu est recréée. En revanche, modifier la mémoire ou le réseau dans le fichier ne change pas une VM déjà créée : supprimez-la, ou démontez le labo, puis relancez.
+- **Ordre de démarrage** : d'abord toutes les créations, puis les démarrages dans l'ordre des dépendances, avec le délai entre chacun. vazy ne sait pas quand un système a fini de démarrer : `apres` garantit l'ordre et le délai, pas que le contrôleur de domaine réponde déjà.
+- `lab status` affiche un tableau par machine, avec l'état `en marche`, `arrêtée`, `à créer`, `absente`, ou `hors labo` quand le nom est pris par une VM qui n'appartient pas à ce labo. Les VM rattachées au labo mais retirées du fichier apparaissent en `(hors fichier)` et sont démontées avec le reste.
+- `lab down` arrête toutes les VM dans l'ordre inverse du démarrage, puis les supprime, après confirmation. `--stop-only` arrête sans supprimer, avec repli en arrêt forcé si les outils de l'invité ne répondent pas ; `--hard` force d'emblée.
 
 ```
 vazy : montage du labo « tp14-ad » (D:\TP\tp14-ad.json)
@@ -499,10 +558,9 @@ Vérifications du labo « tp14-ad »
       3 machine(s), modèles win2022, win11, ordre de démarrage : dc01 > srv01 > client
       à créer : dc01, srv01, client
 Création 1/3 : dc01 -> VM « tp14-ad-dc01 »
-[1/5] Vérifications
       ...
 Démarrage de dc01 -> VM « tp14-ad-dc01 »
-      démarrée en 4,2 s
+      VM « tp14-ad-dc01 » démarrée en 4,2 s
       attente de 10 s avant srv01
 Démarrage de srv01 -> VM « tp14-ad-srv01 » (après dc01)
       ...
@@ -514,27 +572,33 @@ srv01    tp14-ad-srv01   en marche  win2022  2 Go  2    hostonly      dc01
 client   tp14-ad-client  en marche  win11    4 Go  2    nat,hostonly  dc01,srv01
 ```
 
-### Exporter un labo, partager un labo
+---
 
-Monter un TP à la main puis en garder la recette :
+## 9. Partager un labo
+
+### 9.1 Exporter
+
+Vous avez monté un TP à la main, machine par machine, et vous voulez en garder la recette :
 
 ```
 vazy lab export tp20.json --prefixe tp20 --requis
 ```
 
-vazy lit les VM existantes et écrit le fichier qui les recréerait : modèle, RAM, CPU, réseau, réglages `--set` et nom d'hôte de chacune. Trois façons de désigner les VM à exporter :
+vazy lit les VM existantes et écrit le fichier qui les recréerait : modèle, mémoire, cœurs, réseau, réglages bruts et nom d'hôte de chacune. Trois façons de désigner les VM :
 
 | Option | VM concernées |
 |---|---|
-| `--labo <nom>` | Celles montées par un `lab up` précédent (colonne LABO de `vazy list`) |
-| `--prefixe <p>` | Celles dont le nom commence par `p-` (un TP monté à la main en les nommant `tp20-dc01`, `tp20-cli`) |
+| `--labo <nom>` | Celles montées par un `lab up` précédent, colonne LABO de `vazy list` |
+| `--prefixe <p>` | Celles dont le nom commence par `p-`, un TP monté à la main en les nommant `tp20-dc01`, `tp20-cli` |
 | `--vms a,b,c` | Une liste explicite |
 
-Le nom court de chaque machine est son nom de VM sans le préfixe. `--delai <n>` fixe l'attente entre deux démarrages (5 s par défaut), `--yes` remplace un fichier existant sans demander.
+Le nom court de chaque machine est son nom de VM sans le préfixe. `--delai <n>` fixe l'attente entre démarrages, `--yes` remplace un fichier existant sans demander.
 
-L'export **rattache les VM exportées au labo** : elles gardent leur nom, mais `vazy lab up` et `vazy lab down` avec ce fichier les reconnaissent désormais comme les siennes. Sans cela, rejouer le fichier buterait sur « la VM existe déjà mais n'appartient pas à ce labo ». `vazy list` affiche le rattachement dans la colonne LABO.
+L'export **rattache les VM au labo** : elles gardent leur nom, mais `lab up` et `lab down` les reconnaissent désormais comme les siennes. Sans cela, rejouer le fichier buterait sur « cette VM existe déjà mais n'appartient pas à ce labo ».
 
-**`--requis`** ajoute un bloc de prérequis, indispensable si vous partagez le fichier : il décrit les modèles attendus (système, taille de disque déclarée) sous les noms que vous leur donnez. Relisez-le avant d'envoyer le fichier, et remplacez vos noms locaux par des noms standards si vous voulez qu'il soit rejouable par d'autres.
+### 9.2 Les prérequis
+
+`--requis` ajoute un bloc qui décrit les modèles attendus. Il est indispensable si vous partagez le fichier :
 
 ```json
 {
@@ -549,63 +613,33 @@ L'export **rattache les VM exportées au labo** : elles gardent leur nom, mais `
 }
 ```
 
-À l'autre bout, celui qui reçoit le fichier le pose dans son dossier de labos et lance `vazy lab up tp20`. **Les prérequis sont vérifiés avant toute action** : si un modèle manque, vazy refuse et dit quoi préparer, sans avoir créé la moindre VM. Le système et la taille de disque déclarés produisent un avertissement s'ils ne correspondent pas, sans bloquer.
+À l'autre bout, celui qui reçoit le fichier le pose dans son dossier de labos et lance `vazy lab up tp20`. **Les prérequis sont vérifiés avant toute action** : si un modèle manque, vazy refuse et dit précisément quoi préparer, sans avoir créé la moindre VM. Le système et la taille de disque déclarés produisent un simple avertissement s'ils ne correspondent pas.
 
-Le problème classique : le labo demande `win2022`, mais votre modèle s'appelle `windows-server`. Plutôt que de renommer, déclarez une correspondance locale, une fois pour toutes :
+### 9.3 Les alias de modèles
+
+Le problème classique du partage : le labo demande `win2022`, mais votre modèle s'appelle `windows-server`. Plutôt que de renommer, déclarez une correspondance locale, une fois pour toutes :
 
 ```
 vazy template alias windows-server win2022
 ```
 
-Désormais, tout labo qui demande `win2022` utilise votre modèle. `vazy template list` affiche ces noms dans la colonne « AUSSI CONNU COMME », et `--rm` retire la correspondance. Un alias ne peut pas masquer un modèle existant, ni pointer vers deux modèles à la fois.
+Désormais, tout labo qui demande `win2022` utilise votre modèle. `vazy template list` affiche ces noms dans la colonne « AUSSI CONNU COMME », et `--rm` retire la correspondance. Un alias ne peut ni masquer un modèle existant, ni pointer vers deux modèles. La VM créée mémorise le nom réel du modèle, pas l'alias, pour ne pas devenir orpheline si vous retirez la correspondance plus tard.
 
-Ce qui n'est **pas** fait dans cette version : `vazy lab up ad-2022` qui irait chercher le labo dans un dépôt public, `vazy lab search`, `vazy lab publish`. Le format est prêt (bloc `requis`, alias locaux) ; il manque le dépôt et son protocole.
+Ce qui n'est **pas** fait : `vazy lab up ad-2022` qui irait chercher le labo dans un dépôt public, ainsi que `lab search` et `lab publish`. Le format est prêt, il manque le dépôt et son protocole.
 
-### Diagnostic : `vazy doctor`
+---
 
-Sur un outil qui manipule des clones liés, l'écart entre le catalogue et la réalité du disque est certain, pas probable. `vazy doctor` le rend visible :
+## 10. Piloter et voir ses VM à distance
 
-```
-vazy doctor
-```
-
-Il vérifie, dans l'ordre : `vmrun` trouvé et qui répond ; Hyper-V ; espace libre de chaque dossier de VM ; chaque modèle (fichier présent, instantané d'ancrage intact, machine bien éteinte, marque de protection, nombre de clones qui en dépendent) ; chaque VM du catalogue (fichiers présents, état, modèle intact, point de retour présent) ; et les machines trouvées dans vos dossiers mais absentes du catalogue. Chaque ligne en échec est suivie de la marche à suivre. Code de retour 1 s'il y a au moins un échec, 0 sinon.
-
-```
-MODÈLE
-  OK     ubuntu-server          instantané « base » présent ; 3 clone(s) lié(s) en dépendent : TP14, TP15, web
-  ECHEC  win2022                fichier introuvable : D:\VMs\win2022\win2022.vmx ; 2 clone(s) lié(s) en dépendent : ad-dc01, ad-cli
-           -> Remettez le modèle à cet emplacement exact, ou restaurez-le depuis une sauvegarde. Sans lui, ses clones liés ne démarrent plus.
-```
-
-### Rendre une VM autonome : `vazy freeze`
-
-Un clone lié ne contient que ses différences par rapport au modèle : c'est ce qui rend la création instantanée, mais il **meurt si le modèle disparaît ou change**. Pour la VM d'un projet que vous voulez garder six mois :
-
-```
-vazy stop projet-web
-vazy freeze projet-web
-```
-
-vazy en fait une copie complète : la VM occupe alors toute sa taille sur le disque (comptez plusieurs minutes de copie), mais ne dépend plus de rien. `vazy list` et `vazy doctor` la signalent comme autonome, et vazy cesse de vérifier son modèle.
-
-Deux points : la VM doit être **arrêtée**, et les instantanés ne survivent pas à une copie complète. vazy reprend donc le point de retour `vazy-neuf` sur l'état courant, qui devient le nouvel état « neuf » ; vos jalons manuels, eux, sont perdus.
-
-**Protection automatique, sans rien faire** : à la création de chaque clone, vazy enregistre l'empreinte des disques de base du modèle (nom, taille, date). Avant chaque démarrage, il la compare. Si le modèle a disparu, été déplacé, ou si l'un de ses instantanés a été supprimé ou consolidé dans VMware Workstation, vazy refuse de démarrer et dit exactement ce qui manque, au lieu de laisser VMware produire une erreur incompréhensible. Les VM créées avant cette version n'ont pas d'empreinte : `vazy doctor` le signale.
-
-**Limite à connaître avant un TP de routage** : le champ `mode` se limite à `nat`, `bridged` et `hostonly`, c'est-à-dire VMnet8, VMnet0 et VMnet1. Les segments réseau personnalisés (VMnet2, VMnet3, ...) sont **hors périmètre** : ils se créent dans le Virtual Network Editor de VMware avec les droits administrateur, et vazy ne les gère pas. Toutes les machines en `hostonly` partagent le même segment VMnet1 ; deux labos en `hostonly` montés en même temps se voient. Si vous avez déjà créé un VMnet personnalisé à la main, une machine peut s'y brancher via `set` (`"set": { "ethernet0.connectionType": "custom", "ethernet0.vnet": "VMnet2" }`), mais vazy ne vérifie ni son existence ni son adressage.
-
-### Piloter et voir ses VM à distance (téléphone, autre poste)
-
-Le but : depuis une appli terminal sur le téléphone, taper une commande et voir l'écran de la VM, sans rien saisir à la main.
+Le but : depuis une appli terminal sur un téléphone, taper une commande et voir l'écran de la VM, sans rien saisir à la main.
 
 ```
 vazy ubuntu-server --nogui --vnc
 ```
 
-Deux morceaux : le terminal passe par SSH, l'écran passe par le serveur VNC intégré à VMware Workstation Pro.
+Deux morceaux : le terminal passe par SSH, l'écran par le serveur VNC intégré à VMware Workstation Pro.
 
-#### 1. Le terminal : serveur SSH sur le PC
+### 10.1 Le terminal : serveur SSH sur le PC
 
 Windows 11 embarque un serveur SSH, il suffit de l'activer. Dans un **PowerShell administrateur** :
 
@@ -615,23 +649,21 @@ Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
 ```
 
-L'installation crée la règle de pare-feu pour le port 22. Vérifiez que le service tourne avec `Get-Service sshd`.
+L'installation crée la règle de pare-feu du port 22. Vérifiez avec `Get-Service sshd`.
 
-Depuis le téléphone, une appli terminal qui gère SSH (Termux, Termius, JuiceSSH sur Android ; Termius, Blink sur iOS), puis `ssh anthony.cernon@ADRESSE_DU_PC`. Le shell par défaut d'OpenSSH sur Windows est `cmd.exe`, et `vazy` y fonctionne tel quel.
+Depuis le téléphone, il faut une appli terminal : Termux, Termius ou JuiceSSH sur Android, Termius ou Blink sur iOS. Puis `ssh votre-compte@adresse-du-pc`. Le shell par défaut d'OpenSSH sur Windows est `cmd.exe`, et vazy y fonctionne tel quel.
 
-**Par clé plutôt que par mot de passe**, pour ne rien retaper : générez une clé sur le téléphone (`ssh-keygen -t ed25519`), puis collez la clé publique dans `C:\Users\<vous>\.ssh\authorized_keys` sur le PC. Attention, un compte administrateur sous Windows utilise `C:\ProgramData\ssh\administrators_authorized_keys` à la place, avec des droits restreints.
+**Par clé plutôt que par mot de passe**, pour ne rien retaper : générez une clé sur le téléphone avec `ssh-keygen -t ed25519`, puis collez la clé publique dans `C:\Users\<vous>\.ssh\authorized_keys` sur le PC. Attention, un compte administrateur utilise `C:\ProgramData\ssh\administrators_authorized_keys` à la place, avec des droits restreints sur le fichier.
 
-**Depuis l'extérieur, sans ouvrir de port sur la box : Tailscale.** C'est un réseau privé qui relie vos appareils entre eux, où qu'ils soient. Installez-le sur le PC (`winget install tailscale.tailscale`) et sur le téléphone, connectez les deux au même compte. Chaque appareil reçoit une adresse fixe en `100.x.y.z`, joignable de partout, chiffrée de bout en bout, sans redirection de port ni adresse publique. C'est la solution recommandée ici : rien n'est exposé à internet.
+### 10.2 Depuis l'extérieur : Tailscale
 
-#### 2. L'écran : `--vnc`
+Tailscale est un réseau privé qui relie vos appareils entre eux, où qu'ils soient. Installez-le sur le PC avec `winget install tailscale.tailscale` et sur le téléphone, connectez les deux au même compte. Chaque appareil reçoit une adresse fixe en `100.x.y.z`, joignable de partout, chiffrée de bout en bout, **sans redirection de port sur la box et sans adresse publique**. C'est la solution recommandée : rien n'est exposé à internet.
 
-VMware Workstation Pro embarque un serveur VNC, piloté par trois lignes du fichier de configuration de la VM. Rien à installer, c'est le même mécanisme que tout le reste de vazy : écrire du texte dans un fichier.
+### 10.3 L'écran : `--vnc`
 
-```
-vazy ubuntu-server --nogui --vnc
-```
+VMware Workstation Pro embarque un serveur VNC, piloté par trois lignes du fichier de configuration de la VM. Rien à installer : c'est le même mécanisme que tout le reste de vazy, écrire du texte dans un fichier.
 
-vazy choisit un port libre dans la plage réservée (5901 à 5999 par défaut, réglable avec `vncPortMin` et `vncPortMax`), vérifie qu'il n'est pris ni par une autre VM ni par un programme de la machine, tire un mot de passe au hasard, et affiche :
+vazy choisit un port libre dans la plage réservée, 5901 à 5999 par défaut, vérifie qu'il n'est pris ni par une autre VM ni par un programme de la machine, tire un mot de passe au hasard, et affiche :
 
 ```
   Écran de « ubuntu-server-1 » depuis un autre appareil :
@@ -645,17 +677,17 @@ Les applis terminal rendent ce lien tapotable : un appui ouvre le client VNC ave
 | Commande | Effet |
 |---|---|
 | `vazy <modele> --vnc` | Crée la VM avec l'écran distant activé |
-| `vazy vnc <nom>` | Réaffiche le lien ; active l'écran distant s'il ne l'était pas |
+| `vazy vnc <nom>` | Réaffiche le lien, et l'active s'il ne l'était pas |
 | `vazy vnc <nom> off` | Retire l'écran distant et libère le port |
-| `"vnc": true` | Dans un fichier de labo, par machine |
+| `"vnc": true` | Dans un fichier de labo, machine par machine |
 
-L'adresse affichée est celle de Tailscale si une interface Tailscale existe, sinon celle du réseau local, sinon `127.0.0.1`. C'est toujours celle qui a le plus de chances de fonctionner depuis le téléphone. Les adresses des réseaux internes de VMware (VMnet) sont écartées, elles ne sont jamais joignables de l'extérieur.
+L'adresse affichée est celle de Tailscale si une interface Tailscale existe, sinon celle de la carte qui porte la route par défaut. Les réseaux internes de VMware et les autres interfaces virtuelles sont écartés : ils ne sont jamais joignables depuis un téléphone.
 
 Le mot de passe fait exactement 8 caractères. Ce n'est pas un choix, c'est la limite du protocole VNC. Il est tiré au hasard pour chaque VM, conservé au catalogue, et n'apparaît **que** dans le lien affiché à l'écran : jamais dans le journal, jamais dans un message d'erreur.
 
-**Sur un téléphone, il faut une appli VNC qui gère les liens `vnc://`** : bVNC ou RealVNC Viewer sur Android, RealVNC Viewer sur iOS. Sans elle, le lien n'ouvre rien ; recopiez alors l'adresse, le port et le mot de passe affichés juste en dessous.
+**Sur le téléphone, il faut une appli VNC qui gère les liens `vnc://`** : bVNC ou RealVNC Viewer sur Android, RealVNC Viewer sur iOS. Sans elle, le lien n'ouvre rien ; recopiez alors l'adresse, le port et le mot de passe affichés juste en dessous.
 
-#### 3. La règle de pare-feu, sinon rien ne marchera
+### 10.4 La règle de pare-feu, sans laquelle rien ne marchera
 
 Le pare-feu Windows bloque par défaut les ports VNC. Dans un **PowerShell administrateur**, une seule fois :
 
@@ -663,30 +695,40 @@ Le pare-feu Windows bloque par défaut les ports VNC. Dans un **PowerShell admin
 New-NetFirewallRule -DisplayName "vazy VNC (Tailscale)" -Direction Inbound -Protocol TCP -LocalPort 5901-5999 -RemoteAddress 100.64.0.0/10 -Action Allow
 ```
 
-Cette règle n'autorise que les adresses Tailscale. Pour y ajouter votre réseau local, adaptez `-RemoteAddress` (par exemple `@('100.64.0.0/10','192.168.1.0/24')`). N'ouvrez jamais ces ports sans restriction d'adresse.
+Cette règle n'autorise que les adresses Tailscale. Pour y ajouter votre réseau local, adaptez `-RemoteAddress`, par exemple `@('100.64.0.0/10','192.168.1.0/24')`. N'ouvrez jamais ces ports sans restriction d'adresse.
 
-#### 4. Sécurité : ce qu'il ne faut pas faire
+### 10.5 Sécurité : ce qu'il ne faut pas faire
 
-**N'exposez jamais un port VNC sur internet.** Le VNC de VMware ne chiffre rien : le mot de passe, les frappes clavier et l'écran circulent en clair. Le mot de passe est limité à 8 caractères par le protocole, avec un chiffrement obsolète, cassable en quelques minutes. Concrètement : pas de redirection de port sur la box, jamais.
+**N'exposez jamais un port VNC sur internet.** Le VNC de VMware ne chiffre rien : le mot de passe, les frappes clavier et l'écran circulent en clair. Le mot de passe est limité à 8 caractères par le protocole, avec un chiffrement obsolète, cassable en quelques minutes. Concrètement : aucune redirection de port sur la box, jamais.
 
 Deux façons sûres d'y accéder de l'extérieur :
 
-- **Tailscale**, recommandé : le trafic est chiffré de bout en bout entre vos appareils, rien n'est exposé.
-- **Un tunnel dans la connexion SSH**, si vous préférez ne rien installer de plus. Depuis le téléphone : `ssh -L 5901:127.0.0.1:5901 anthony.cernon@ADRESSE_DU_PC`, puis pointez le client VNC sur `127.0.0.1:5901`. Le VNC voyage alors dans le tunnel SSH, chiffré. Le lien affiché par vazy ne conviendra pas dans ce cas, l'adresse étant différente.
+- **Tailscale**, recommandé. Le trafic est chiffré de bout en bout entre vos appareils, rien n'est exposé.
+- **Un tunnel dans la connexion SSH**, si vous préférez ne rien installer de plus. Depuis le téléphone, `ssh -L 5901:127.0.0.1:5901 votre-compte@adresse-du-pc`, puis pointez le client VNC sur `127.0.0.1:5901`. Le VNC voyage alors chiffré dans le tunnel. Le lien affiché par vazy ne conviendra pas dans ce cas, l'adresse étant différente.
 
-Le serveur VNC de VMware écoute sur toutes les interfaces de la machine ; c'est la règle de pare-feu ci-dessus qui restreint qui peut l'atteindre. Ne la retirez pas.
+Le serveur VNC de VMware écoute sur toutes les interfaces de la machine. C'est la règle de pare-feu ci-dessus qui restreint qui peut l'atteindre : ne la retirez pas.
 
-#### Ce qu'il faut savoir avant le premier essai
+### 10.6 Avant le premier essai
 
 - Les lignes VNC sont **lues au démarrage de la VM**. Activer l'écran distant sur une VM qui tourne déjà n'a d'effet qu'après un redémarrage ; vazy le dit et donne la commande.
-- Depuis une session SSH, préférez `--nogui`. Une session SSH n'a pas de bureau : l'ouverture d'une fenêtre VMware peut échouer ou s'afficher sur la session déjà ouverte sur le PC. Avec `--nogui`, la VM tourne sans fenêtre et l'écran distant devient le moyen de la voir, ce qui est exactement le but.
-- Le serveur VNC intégré peut refuser de démarrer si l'accélération 3D est activée dans la VM. Si l'écran reste noir, désactivez-la : `--set mks.enable3d=FALSE`.
+- Depuis une session SSH, préférez `--nogui`. Une session SSH n'a pas de bureau : l'ouverture d'une fenêtre VMware peut échouer ou s'afficher sur la session ouverte devant le PC. Avec `--nogui`, la VM tourne sans fenêtre et l'écran distant devient le moyen de la voir, ce qui est exactement le but.
+- Le serveur VNC intégré peut refuser de démarrer quand l'accélération 3D est active dans la VM. Si l'écran reste noir, désactivez-la avec `--set mks.enable3d=FALSE`.
 
-### Personnalisation de l'invité (nom d'hôte)
+---
 
-Les clones d'un modèle sont identiques : même nom d'hôte, même identifiant machine, mêmes clés SSH. vazy peut donner à chaque clone son **nom d'hôte**, avec `--hostname` ou, dans un labo, le nom court de chaque machine par défaut. Deux méthodes, choisies d'après le modèle (`vazy template list` l'affiche) :
+## 11. Personnalisation de l'invité
 
-**Méthode guestinfo (recommandée, sans identifiant).** Le modèle embarque le script `vazy-guestinfo` (section 3.3) et est marqué `vazy template mark <alias> --guestinfo`. Avant **chaque** démarrage fait par vazy (création, `start`, `reset`, `back`, `lab up`), vazy dépose la configuration dans la machine, sous forme d'une variable `guestinfo.vazy_config` que le script lit au démarrage avec les outils invité et applique lui-même. vazy n'entre jamais dans la VM. Rien à réappliquer après `reset` ou `back` : le script relit la variable à chaque démarrage, le nom revient tout seul. Aucune attente, aucun compte, aucun mot de passe nulle part.
+Les clones d'un modèle sont identiques : même nom d'hôte, même identifiant machine, mêmes clés SSH. Sur un TP réseau, c'est bloquant. vazy donne à chaque clone son **nom d'hôte**, avec `--hostname` ou, dans un labo, le nom court de chaque machine par défaut.
+
+Deux méthodes, choisies d'après le modèle. `vazy template list` affiche celle qui s'applique.
+
+### 11.1 Méthode guestinfo, recommandée
+
+Le modèle embarque le script `vazy-guestinfo` et a été marqué avec `vazy template mark <alias> --guestinfo`.
+
+Avant **chaque** démarrage fait par vazy, qu'il s'agisse d'une création, d'un `start`, d'un `reset`, d'un `back` ou d'un `lab up`, vazy dépose la configuration dans la machine sous forme d'une variable `guestinfo.vazy_config`. Le script du modèle la lit au démarrage avec les outils invité et l'applique lui-même. **vazy n'entre jamais dans la VM.**
+
+Il n'y a rien à réappliquer après un `reset` ou un `back` : le script relit la variable à chaque démarrage, donc le nom revient tout seul. Aucune attente, aucun compte, aucun mot de passe nulle part.
 
 La charge utile est du JSON encodé en base64, pour éviter tout problème d'échappement :
 
@@ -694,254 +736,441 @@ La charge utile est du JSON encodé en base64, pour éviter tout problème d'éc
 { "hostname": "web1" }
 ```
 
-Le format accueillera plus tard `ip`, `masque`, `passerelle`, `dns`, `cle_ssh` ; seul `hostname` est appliqué aujourd'hui, et le script invité ignore toute clé qu'il ne connaît pas. Détail technique : la variable est écrite dans la configuration de la VM (clé `guestinfo.vazy_config` du `.vmx`), machine éteinte, ce qui la rend persistante ; `vmrun writeVariable ... guestVar` n'aurait pas convenu, cette forme n'existe qu'à l'exécution et disparaît à l'extinction.
+Le format accueillera plus tard `ip`, `masque`, `passerelle`, `dns` et `cle_ssh`. Seul `hostname` est appliqué aujourd'hui, et le script invité ignore silencieusement toute clé qu'il ne connaît pas, ce qui garde la compatibilité avec les versions futures.
 
-**Méthode classique (repli, par identifiants).** Pour un modèle qu'on ne peut pas modifier : `vazy template creds <alias>` enregistre un compte de l'invité (mot de passe saisi masqué, stocké chiffré par DPAPI dans `%LOCALAPPDATA%\vazy\creds\<alias>.xml`, lisible uniquement par votre compte Windows sur ce PC ; jamais affiché, masqué par `***` dans tout message venant de VMware). Après chaque démarrage fait par vazy, celui-ci attend que les outils invité répondent (`delaiOutilsSec`, 120 s par défaut, avec nouvelles tentatives sur le premier script, car les outils se disent prêts un peu avant de l'être), puis exécute le script de renommage dans la VM : `hostnamectl` et `/etc/hosts` sous Linux ; `Rename-Computer` sous Windows, **sans redémarrer** : le script rend la main et c'est vazy qui arrête proprement la VM puis la redémarre, pour un état déterministe. Le script est idempotent. Limite à connaître : `vmrun` ne reçoit ces identifiants que par `-gu` et `-gp` sur sa ligne de commande, visible pendant les quelques secondes de l'appel pour les processus de votre compte Windows ; et surtout, ce compte privilégié est cloné dans toutes vos VM.
+Détail technique, si vous vous demandez pourquoi ce n'est pas `vmrun writeVariable` : cette forme de variable n'existe qu'à l'exécution et disparaît à l'extinction, alors que la clé écrite dans le fichier de configuration est persistante et se pose machine éteinte, avant le démarrage. C'est le mécanisme qu'utilisent cloud-init et Terraform sur VMware.
 
-Règle absolue, dans les deux méthodes : si la personnalisation échoue (script absent du modèle, outils absents, identifiants refusés, nom invalide), **la VM reste créée et démarrée**. vazy avertit avec la cause et la marche à suivre.
+### 11.2 Méthode classique, par identifiants
 
-Ce qui n'est pas fait dans cette version : IP fixe, clé SSH de l'utilisateur, SID Windows. Le format et le script sont prêts à les accueillir ; le nom d'hôte doit d'abord tenir la route sur un vrai TP.
+Pour un modèle qu'on ne peut pas modifier. `vazy template creds <alias>` enregistre un compte de l'invité. Le mot de passe est saisi masqué au clavier, jamais sur la ligne de commande, et stocké chiffré par DPAPI dans `%LOCALAPPDATA%\vazy\creds\<alias>.xml` : le fichier n'est lisible que par votre compte Windows sur ce PC, et devient inutilisable ailleurs.
+
+Après chaque démarrage, vazy attend que les outils invité répondent, avec des nouvelles tentatives sur le premier script car les outils se déclarent prêts un peu avant de l'être, puis exécute le script de renommage dans la VM. Sous Linux, `hostnamectl` et `/etc/hosts`. Sous Windows, `Rename-Computer` **sans redémarrer** : le script rend la main, et c'est vazy qui arrête proprement la VM puis la redémarre, pour un état déterministe plutôt qu'une connexion coupée en plein vol.
+
+Deux limites à connaître. `vmrun` ne reçoit les identifiants que par des options de sa ligne de commande, visibles pendant les quelques secondes de l'appel pour les processus de votre compte Windows. Et surtout, ce compte privilégié est cloné dans toutes vos VM.
+
+### 11.3 Règle absolue
+
+Si la personnalisation échoue, pour quelque raison que ce soit, **la VM reste créée et démarrée**. vazy avertit en donnant la cause et la marche à suivre, mais n'annule rien. Une VM utilisable avec un mauvais nom d'hôte vaut mieux qu'une VM supprimée.
+
+Ce qui n'est pas fait dans cette version : IP fixe, clé SSH de l'utilisateur, SID Windows. Le format et le script sont prêts à les accueillir.
 
 ---
 
-## 5. `--set` : régler n'importe quel paramètre
+## 12. Protéger son travail : doctor, empreinte, freeze
 
-Une VM VMware est entièrement décrite par son fichier `.vmx`, un fichier texte de lignes `cle = "valeur"`. `--set cle=valeur` écrit littéralement cette ligne dans le `.vmx` du clone (la ligne existante est remplacée, sinon elle est ajoutée). Comme il s'applique **après** les options nommées, il peut les écraser : `--ram 4 --set memsize=8192` donne 8 Go.
+### 12.1 Le diagnostic
 
-Quelques réglages utiles :
+Sur un outil qui manipule des clones liés, l'écart entre le catalogue et la réalité du disque est certain, pas probable. `vazy doctor` le rend visible.
+
+```
+vazy doctor
+```
+
+Il vérifie, dans l'ordre : `vmrun` trouvé et qui répond ; Hyper-V ; espace libre de chaque dossier de VM ; chaque modèle, avec son fichier, son instantané d'ancrage, le fait qu'il soit bien éteint, sa marque de protection et le nombre de clones qui en dépendent ; chaque VM du catalogue, avec ses fichiers, son état, l'intégrité de son modèle, son point de retour et son écran distant ; enfin les machines trouvées dans vos dossiers mais absentes du catalogue.
+
+Chaque ligne en échec est suivie de la marche à suivre. Le code de retour est 1 s'il reste au moins un échec, 0 sinon.
+
+```
+MODÈLE
+  OK     ubuntu-server          instantané « base » présent ; 3 clone(s) lié(s) en dépendent : TP14, TP15, web
+  ECHEC  win2022                fichier introuvable : D:\VMs\win2022\win2022.vmx ; 2 clone(s) lié(s) en dépendent : ad-dc01, ad-cli
+           -> Remettez le modèle à cet emplacement exact, ou restaurez-le depuis une sauvegarde. Sans lui, ses clones liés ne démarrent plus.
+```
+
+### 12.2 L'empreinte du modèle, sans rien faire
+
+À la création de chaque clone, vazy enregistre l'empreinte des disques de base du modèle : nom, taille, date. Avant chaque démarrage, il la compare.
+
+Si le modèle a disparu, a été déplacé, ou si l'un de ses instantanés a été supprimé ou consolidé dans VMware Workstation, vazy refuse de démarrer et dit exactement ce qui manque, au lieu de laisser VMware produire une erreur incompréhensible. Les VM créées avant la version 1.6 n'ont pas d'empreinte, et `vazy doctor` le signale.
+
+### 12.3 Rendre une VM autonome
+
+Un clone lié ne contient que ses différences : c'est ce qui rend la création instantanée, mais il **meurt si le modèle disparaît ou change**. Pour la VM d'un projet que vous voulez garder six mois :
+
+```
+vazy stop projet-web
+vazy freeze projet-web
+```
+
+vazy en fait une copie complète. La VM occupe alors toute sa taille sur le disque, comptez plusieurs minutes de copie, mais ne dépend plus de rien. `vazy list` et `vazy doctor` la signalent comme autonome, et vazy cesse de vérifier son modèle.
+
+Deux points : la VM doit être **arrêtée**, et les instantanés ne survivent pas à une copie complète. vazy reprend donc `vazy-neuf` sur l'état courant, qui devient le nouvel état neuf ; vos jalons manuels, eux, sont perdus.
+
+---
+
+## 13. Régler n'importe quel paramètre
+
+Une VM VMware est entièrement décrite par son fichier `.vmx`, un fichier texte de lignes `cle = "valeur"`. `--set cle=valeur` écrit littéralement cette ligne dans le fichier du clone : la ligne existante est remplacée, sinon elle est ajoutée. Comme il s'applique **après** les options nommées, il peut les écraser. `--ram 4 --set memsize=8192` donne 8 Go.
+
+C'est l'échappatoire du projet : tout ce que ni vous ni vazy n'avez prévu reste accessible, sans attendre une nouvelle version.
 
 | `--set` | Effet |
 |---|---|
-| `svga.autodetect=FALSE` + `svga.vramSize=16777216` | Fige la mémoire vidéo (16 Mo) |
+| `svga.autodetect=FALSE` et `svga.vramSize=16777216` | Fige la mémoire vidéo à 16 Mo |
+| `mks.enable3d=FALSE` | Désactive l'accélération 3D, nécessaire si l'écran VNC reste noir |
 | `usb.present=TRUE` | Active le contrôleur USB |
 | `sound.present=FALSE` | Retire la carte son |
-| `mainMem.useNamedFile=FALSE` | Pas de fichier `.vmem` de la taille de la RAM à côté de la VM |
-| `bios.bootDelay=3000` | 3 s de délai au démarrage pour attraper le menu du BIOS |
+| `mainMem.useNamedFile=FALSE` | Évite le fichier mémoire de la taille de la RAM à côté de la VM |
+| `bios.bootDelay=3000` | Trois secondes de délai au démarrage pour attraper le menu du BIOS |
 | `bios.forceSetupOnce=TRUE` | Entre dans le BIOS au prochain démarrage |
-| `ethernet0.virtualDev=e1000` | Change le type de carte réseau (`e1000`, `e1000e`, `vmxnet3`) |
-| `ethernet0.connectionType=custom` + `ethernet0.vnet=VMnet2` | Branche la carte 0 sur un réseau personnalisé déjà créé dans le Virtual Network Editor |
+| `ethernet0.virtualDev=e1000` | Change le type de carte réseau : `e1000`, `e1000e`, `vmxnet3` |
+| `ethernet0.connectionType=custom` et `ethernet0.vnet=VMnet2` | Branche la carte sur un réseau personnalisé déjà créé |
 | `guestOS=ubuntu-64` | Type de système invité déclaré à VMware |
-| `tools.syncTime=TRUE` | Synchronise l'horloge sur l'hôte |
-| `displayName=TP 14 - Serveur web` | Nom affiché dans VMware (les espaces sont acceptés ici, contrairement à `--name`) |
+| `tools.syncTime=TRUE` | Synchronise l'horloge sur celle de l'hôte |
+| `displayName=TP 14 - Serveur web` | Nom affiché dans VMware ; les espaces sont acceptés ici, contrairement à `--name` |
 
-Pour découvrir une clé : faites le réglage une fois dans l'interface de VMware sur une VM éteinte, puis ouvrez son `.vmx` dans un éditeur de texte et repérez la ligne ajoutée.
+Pour découvrir une clé : faites le réglage une fois dans l'interface de VMware sur une VM éteinte, puis ouvrez son `.vmx` dans un éditeur et repérez la ligne ajoutée.
 
-Note : vazy ajoute lui-même `msg.autoAnswer = "TRUE"` à chaque clone pour que VMware réponde seul aux questions au démarrage (« cette VM a été déplacée ou copiée ? »). `--set msg.autoAnswer=FALSE` l'annule.
+vazy ajoute lui-même `msg.autoAnswer = "TRUE"` à chaque clone, pour que VMware réponde seul à la question « cette VM a-t-elle été déplacée ou copiée ? » au démarrage. `--set msg.autoAnswer=FALSE` l'annule.
 
 ---
 
-## 6. Configuration et fichiers
+## 14. Outillage : simulation, journal, configuration
 
-vazy range ses données dans `%LOCALAPPDATA%\vazy\` (`C:\Users\<vous>\AppData\Local\vazy\`) :
+### 14.1 `--dry-run`
+
+N'exécute rien. Affiche en magenta les commandes exactes qui seraient lancées et les lignes qui seraient écrites dans la configuration des VM. Les lectures, elles, ont bien lieu : sans elles il n'y aurait rien à décider. Ni le catalogue ni les fichiers ne sont touchés.
+
+```
+vazy ubuntu-server --name TP20 --ram 4 --dry-run
+vazy lab down tp14 --yes --dry-run
+```
+
+C'est un filet de sécurité avant une opération destructrice, et le moyen le plus simple d'apprendre `vmrun` pour de bon.
+
+### 14.2 Le journal
+
+Chaque opération est enregistrée dans `%LOCALAPPDATA%\vazy\journal.log` : la ligne de commande vazy, chaque commande `vmrun` lancée avec son code de retour et sa durée, et chaque écriture dans un fichier de configuration. Les mots de passe y sont remplacés par `***`, qu'il s'agisse d'identifiants d'invité ou d'un mot de passe VNC. Le fichier tourne tout seul au-delà de 2 Mo.
+
+C'est le premier endroit à regarder quand quelque chose s'est mal passé.
+
+### 14.3 Les fichiers de vazy
+
+Tout est dans `%LOCALAPPDATA%\vazy\`, c'est-à-dire `C:\Users\<vous>\AppData\Local\vazy\`.
 
 | Fichier | Contenu |
 |---|---|
 | `config.json` | Réglages de l'outil |
-| `catalogue.json` | Modèles enregistrés et VM créées (clé `version` : schéma du fichier ; un catalogue plus ancien est migré automatiquement au premier lancement, sans perte) |
-| `creds\<alias>.xml` | Identifiants d'invité d'un modèle, chiffrés pour votre compte Windows (jamais en clair) |
-| `journal.log` | Trace de chaque opération : commandes `vmrun`, codes de retour, écritures de configuration |
+| `catalogue.json` | Modèles enregistrés et VM créées. La clé `version` note le schéma ; un catalogue plus ancien est migré automatiquement, sans perte |
+| `journal.log` | Trace de chaque opération |
+| `creds\<alias>.xml` | Identifiants d'invité d'un modèle, chiffrés pour votre compte Windows |
+| `labos\<nom>.json` | Fichiers de labo enregistrés, retrouvés par leur nom |
 
-Clés de `config.json`, modifiables avec `vazy config <cle> <valeur>` (valeur `""` pour revenir au défaut) :
+### 14.4 La configuration
+
+`vazy config` affiche les réglages, `vazy config <cle> <valeur>` en modifie un, et une valeur vide revient au défaut.
 
 | Clé | Rôle | Défaut |
 |---|---|---|
-| `dossierVms` | Dossier où sont créées les VM (`<dossierVms>\<nom>\<nom>.vmx`) | vide : dossier parent du modèle |
-| `outilHyperviseur` | Chemin de l'outil en ligne de commande de l'hyperviseur (`vmrun.exe`) si la détection automatique échoue | vide : détection automatique |
-| `espaceDisqueMinGo` | Marge d'espace libre exigée, en plus de la RAM de la VM | `1` |
-| `delaiOutilsSec` | Attente maximale des outils invité avant d'appliquer un nom d'hôte (5 à 1800 s) | `120` |
-| `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants des VM | `5901`, `5999` |
-| `dossierLabos` | Où sont rangés les fichiers de labo, retrouvés par leur nom | `%LOCALAPPDATA%\vazy\labos` |
-| `hyperviseur` | Pilote utilisé (`lib\pilote-<hyperviseur>.ps1`) | `vmware` |
+| `dossierVms` | Dossier où sont créées les VM | dossier parent du modèle |
+| `dossierLabos` | Où sont rangés les fichiers de labo | `%LOCALAPPDATA%\vazy\labos` |
+| `outilHyperviseur` | Chemin de `vmrun.exe` si la détection automatique échoue | détection automatique |
+| `espaceDisqueMinGo` | Marge d'espace libre exigée, en plus de la mémoire de la VM | `1` |
+| `delaiOutilsSec` | Attente maximale des outils invité, de 5 à 1800 secondes | `120` |
+| `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants | `5901`, `5999` |
+| `hyperviseur` | Pilote utilisé, c'est-à-dire `lib\pilote-<hyperviseur>.ps1` | `vmware` |
 
-Espace disque : avant de cloner, vazy vérifie qu'il reste au moins `RAM de la VM + espaceDisqueMinGo` Go sur le disque de destination (VMware crée pendant l'exécution un fichier de mémoire de la taille de la RAM). Sinon il refuse, sans rien créer.
+**Espace disque** : avant de cloner, vazy vérifie qu'il reste au moins la mémoire de la VM plus la marge sur le disque de destination, car VMware crée pendant l'exécution un fichier de la taille de la mémoire. Sinon il refuse, sans rien créer.
 
-Variables d'environnement :
+Deux variables d'environnement, utiles pour les essais :
 
-- `VAZY_HOME` : autre dossier pour `config.json` et `catalogue.json` (pratique pour tester sans toucher à sa configuration).
+- `VAZY_HOME` : un autre dossier pour la configuration et le catalogue, pratique pour tester sans toucher à son installation.
 - `VAZY_DEBUG=1` : affiche la pile d'appel complète en cas d'erreur inattendue.
 
 ---
 
-## 7. Problèmes fréquents
+## 15. Référence des commandes
+
+**Créer**
+
+| Commande | Effet |
+|---|---|
+| `vazy <modele> [options]` | Crée un clone lié du modèle et le démarre. Options à la [section 5.1](#51-la-commande-principale) |
+
+**Cycle de vie**
+
+| Commande | Effet |
+|---|---|
+| `vazy list` | Les VM créées par vazy, avec leur état |
+| `vazy start <nom> [--nogui]` | Démarre |
+| `vazy stop <nom> [--hard]` | Arrête proprement ; `--hard` coupe le courant |
+| `vazy rm <nom> [--yes]` | Supprime la VM et ses fichiers, après confirmation |
+| `vazy gc [--yes]` | Supprime les VM éphémères éteintes |
+
+**Instantanés**
+
+| Commande | Effet |
+|---|---|
+| `vazy reset <nom> [--nostart] [--nogui]` | Retour à `vazy-neuf`, puis redémarrage |
+| `vazy snap <nom> [libelle]` | Instantané manuel |
+| `vazy snaps <nom>` | Liste les instantanés |
+| `vazy back <nom> <libelle> [--nostart] [--nogui]` | Retour à un instantané manuel |
+| `vazy unsnap <nom> <libelle> [--yes]` | Supprime un instantané manuel |
+
+**Labos**
+
+| Commande | Effet |
+|---|---|
+| `vazy lab up <nom> [--vm nom:modele[:ram[:cpu]]] ... [--save]` | Monte un labo décrit en une ligne, ou remonte un labo enregistré |
+| `vazy lab new <nom>` | Assistant interactif, puis écriture du fichier |
+| `vazy lab status <nom>` | État de chaque machine |
+| `vazy lab down <nom> [--yes] [--stop-only] [--hard]` | Arrête et supprime le labo |
+| `vazy lab export <fichier> --labo\|--prefixe\|--vms [--requis] [--delai n] [--yes]` | Génère le fichier qui recréerait des VM existantes |
+
+**Modèles**
+
+| Commande | Effet |
+|---|---|
+| `vazy template add <chemin.vmx> [--name <alias>] [--snapshot <nom>]` | Enregistre un modèle ; le dossier de la VM est accepté |
+| `vazy template list` | Modèles, instantané, clones, système, méthode de personnalisation, alias |
+| `vazy template rm <alias>` | Retire du catalogue ; **aucun fichier de VM n'est supprimé** |
+| `vazy template mark <alias> --guestinfo\|--classique` | Déclare que le modèle embarque le script d'auto-configuration |
+| `vazy template alias <alias> <nom standard> [--rm]` | Fait répondre le modèle à un nom standard |
+| `vazy template creds <alias> [--user <nom>] [--os linux\|windows] [--rm]` | Identifiants d'invité, méthode de repli |
+
+**Écran distant**
+
+| Commande | Effet |
+|---|---|
+| `vazy vnc <nom>` | Affiche le lien, l'active si besoin |
+| `vazy vnc <nom> off` | Retire l'écran distant et libère le port |
+
+**Divers**
+
+| Commande | Effet |
+|---|---|
+| `vazy doctor` | Diagnostic complet |
+| `vazy freeze <nom> [--yes]` | Convertit un clone lié en VM autonome |
+| `vazy config [<cle> <valeur>]` | Affiche ou modifie la configuration |
+| `vazy help`, `vazy version` | |
+
+**Codes de retour** : `0` succès, `1` erreur, `2` erreur de syntaxe. `vazy doctor` renvoie 1 s'il a trouvé au moins un problème.
+
+---
+
+## 16. Dépannage
+
+### Installation et démarrage
 
 **« vmrun.exe est introuvable »**
-VMware Workstation n'est pas installé, ou dans un dossier inhabituel. Indiquez le chemin : `vazy config outilHyperviseur "C:\...\vmrun.exe"`.
+VMware Workstation n'est pas installé, ou se trouve dans un dossier inhabituel. Indiquez le chemin : `vazy config outilHyperviseur "C:\...\vmrun.exe"`.
+
+**« L'exécution de scripts est désactivée sur ce système »**
+Vous avez lancé `lib\interface.ps1` directement. Passez par `vazy.cmd`, ce que fait la commande `vazy` quand le dossier est dans le PATH. Ou autorisez les scripts pour votre compte : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 **« Un hyperviseur Windows (Hyper-V) est actif »**
-Sur Windows, un seul hyperviseur peut posséder le processeur. Quand Hyper-V est actif (à cause de WSL2, Docker Desktop, Windows Sandbox, ou de l'option « Intégrité de la mémoire » dans Sécurité Windows > Sécurité de l'appareil > Isolation du noyau), VMware bascule sur la couche de virtualisation de Windows : ça fonctionne, mais plus lentement et sans virtualisation imbriquée. vazy prévient (message complet une fois, puis un rappel d'une ligne) et continue. Pour rendre le processeur à VMware, dans une invite de commandes administrateur puis redémarrage :
+Sur Windows, un seul hyperviseur possède le processeur. Quand Hyper-V est actif, à cause de WSL2, Docker Desktop, Windows Sandbox ou de l'option « Intégrité de la mémoire », VMware bascule sur la couche de virtualisation de Windows : cela fonctionne, mais plus lentement et sans virtualisation imbriquée. vazy prévient une fois en détail, puis d'une ligne, et continue. Pour rendre le processeur à VMware, dans une invite de commandes administrateur puis redémarrage :
 
 ```
 bcdedit /set hypervisorlaunchtype off
 ```
 
-WSL2, Docker Desktop et Windows Sandbox cesseront alors de fonctionner ; `bcdedit /set hypervisorlaunchtype auto` revient en arrière. Pensez aussi à désactiver « Intégrité de la mémoire » si elle est active.
-
-**« Le modèle n'a aucun instantané »**
-Voir la section 3.3. Éteignez la VM, prenez un instantané, relancez `vazy template add`.
-
-**« Arrêt propre impossible : les VMware Tools ne répondent pas »**
-Le système invité n'a pas les outils VMware (ou n'a pas fini de démarrer). Éteignez depuis l'intérieur de la VM, ou `vazy stop <nom> --hard` (équivaut à débrancher la prise). Installez les outils dans le modèle pour que ça n'arrive plus.
-
-**« La VM ... n'a pas de point de retour vazy-neuf »**
-La VM a été créée avant la version qui prend cet instantané automatiquement (ou l'instantané a été supprimé dans VMware). Créez-le une fois, VM éteinte : `vazy stop <nom>` puis `vazy snap <nom> vazy-neuf`.
-
-**« Refus de ... : ... est marquée comme modèle »**
-Le pilote a trouvé le fichier témoin `<modele>.vmx.vazy-modele` : la VM visée est un modèle, et l'opération (démarrage, suppression, instantané) casserait ses clones. Si vous devez vraiment agir dessus, retirez-le du catalogue avec `vazy template rm <alias>`, ce qui retire aussi la marque.
-
-**« Le retour à l'instantané ... a échoué »**
-VMware met parfois quelques secondes à libérer une VM après un arrêt forcé : relancez la commande. Vérifiez aussi que l'instantané existe encore (`vazy snaps <nom>`), il a pu être supprimé depuis VMware Workstation.
-
-**Ma VM éphémère n'a pas été supprimée**
-Elle tourne encore : fermer sa fenêtre ne l'éteint pas si VMware Workstation est réglé pour garder les VM en marche en arrière-plan (`vazy list` la montre « en marche »). Éteignez-la depuis l'intérieur ou avec `vazy stop <nom>`. Si elle est éteinte et toujours là, lancez `vazy gc` : le message dira pourquoi (par exemple plus de 3 VM à supprimer, confirmation attendue).
-
-**« ... VM éphémères éteintes à supprimer : c'est beaucoup pour un nettoyage automatique »**
-Plus de 3 VM éphémères se sont retrouvées éteintes en même temps, ce qui ressemble à une anomalie (coupure, arrêt de l'hôte). Vérifiez avec `vazy list`, puis `vazy gc --yes` pour les supprimer toutes.
-
-**« Le modèle ... a changé depuis la création de ... » au démarrage d'une VM**
-Les disques de base du modèle ne sont plus ceux sur lesquels ce clone lié a été créé. Cause habituelle : un instantané du modèle a été supprimé ou consolidé dans le Snapshot Manager de VMware, ou le disque a été compacté. Le clone est probablement perdu. `vazy doctor` dit quelles VM sont touchées. Pour l'avenir, `vazy freeze` rend autonome une VM que vous tenez à garder.
-
-**« ... modèle(s) requis manquant(s) »** en montant le labo de quelqu'un d'autre
-Le fichier référence un modèle sous un nom que vous n'avez pas. Soit vous le préparez, soit vous avez déjà l'équivalent sous un autre nom : `vazy template alias <votre modèle> <nom attendu>`.
-
-**« Fichier ..., machine « x » : clé inconnue ... » ou « n'est pas du JSON valide »**
-Le fichier de labo est vérifié en entier avant toute action. Le message nomme la machine et la clé fautive ; comparez avec `exemples\tp14-ad.json`. Erreur JSON classique : une virgule après le dernier élément d'un objet ou d'une liste.
-
-**« dépendances circulaires entre ... »**
-Les clés `apres` de ces machines forment une boucle (a après b, b après a). L'une d'elles doit démarrer sans attendre les autres.
-
-**« La VM ... existe déjà mais appartient à une VM créée à la main / au labo ... »**
-Le nom préfixé est déjà pris par une VM qui n'a pas été créée par ce labo. Changez le nom du labo ou de la machine dans le fichier, ou supprimez cette VM.
-
-**Le nom d'hôte n'est pas appliqué sur un modèle guestinfo (rien ne se passe au démarrage)**
-Dans la VM : `systemctl status vazy-guestinfo` (Linux) ou le journal `C:\ProgramData\vazy\vazy-guestinfo.log` (Windows). Vérifiez que `vmtoolsd --cmd "info-get guestinfo.vazy_config"` affiche une valeur dans la VM : si « No value found », vazy n'a rien déposé (le modèle n'est peut-être pas marqué : `vazy template list`) ; si une valeur base64 apparaît, le script ne s'est pas exécuté (unité désactivée, script installé après l'instantané).
-
-**« nom d'hôte ... non appliqué : outils invité injoignables après 120 s »**
-Les outils invité ne sont pas installés dans le modèle, ou l'invité met plus longtemps à démarrer. Installez `open-vm-tools` / VMware Tools dans le modèle ; pour un invité lent, `vazy config delaiOutilsSec 300`. La VM tourne quand même ; le nom sera réessayé au prochain démarrage par vazy.
-
-**« nom d'hôte ... non appliqué : Exécution dans l'invité impossible : ... exit code ... »**
-Le script a tourné mais a échoué : sous Linux, le compte ne peut pas faire `sudo` sans mot de passe ; sous Windows, le compte n'est pas administrateur élevé (utilisez le compte `Administrateur` intégré). Corrigez dans le modèle, ou dans la VM concernée, puis `vazy stop x` et `vazy start x`.
-
-**« L'invité a refusé le compte ... »**
-Utilisateur ou mot de passe faux, ou compte qui ne peut pas ouvrir de session. `vazy template creds <alias>` pour les ressaisir.
-
-**« Les identifiants d'invité du modèle ... sont illisibles »**
-Le fichier `creds\<alias>.xml` a été chiffré par un autre compte Windows ou sur un autre PC : il est inutilisable ici, c'est voulu. Ressaisissez-les.
-
-**« Le nom ... est déjà utilisé » ou « Le dossier ... existe déjà »**
-vazy n'écrase jamais rien. Choisissez un autre `--name`, ou supprimez l'ancienne VM avec `vazy rm`. Un dossier orphelin (VM créée puis effacée à la main dans VMware) se supprime avec l'Explorateur.
+WSL2, Docker Desktop et Windows Sandbox cesseront de fonctionner ; `auto` à la place de `off` revient en arrière. Pensez aussi à désactiver « Intégrité de la mémoire » dans Sécurité Windows, section Isolation du noyau.
 
 **Sous PowerShell, `--mode nat,hostonly` ou `--ram 1,5` donnent « Argument inattendu »**
 PowerShell découpe sur la virgule avant de transmettre les arguments. Écrivez `--mode nat --mode hostonly` et `--ram 1.5`, ou mettez des guillemets.
 
-**« L'exécution de scripts est désactivée sur ce système »**
-Vous avez lancé `lib\interface.ps1` directement. Passez par `vazy.cmd` (c'est ce que fait la commande `vazy` quand le dossier est dans le PATH), ou autorisez les scripts pour votre compte : `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+### Modèles et clones
 
-**Une VM supprimée avec `vazy rm` apparaît encore dans la bibliothèque de VMware Workstation**
+**« Le modèle n'a aucun instantané »**
+Un clone lié doit s'appuyer sur un instantané. Éteignez la VM, prenez-en un, puis relancez `vazy template add`. Voir la [section 4.6](#46-éteindre-linstantané-lenregistrement).
+
+**« Refus de ... : ... est marquée comme modèle »**
+Le pilote a trouvé le fichier témoin posé à côté du modèle. L'opération demandée casserait ses clones. Si vous devez vraiment agir dessus, retirez-le du catalogue avec `vazy template rm <alias>`, ce qui retire aussi la marque.
+
+**« Le modèle ... a changé depuis la création de ... »**
+Les disques de base ne sont plus ceux sur lesquels ce clone a été créé. Cause habituelle : un instantané du modèle a été supprimé ou consolidé dans le gestionnaire d'instantanés de VMware, ou le disque a été compacté. Le clone est probablement perdu. `vazy doctor` dit quelles VM sont touchées. Pour l'avenir, `vazy freeze` rend autonome une VM à laquelle vous tenez.
+
+**« Le modèle ... est introuvable »**
+Le modèle a été déplacé ou supprimé. Remettez-le à cet emplacement exact, ou restaurez-le. Un clone lié ne peut pas démarrer sans son modèle.
+
+**« Le nom ... est déjà utilisé » ou « Le dossier ... existe déjà »**
+vazy n'écrase jamais rien. Choisissez un autre `--name`, ou supprimez l'ancienne VM. Un dossier orphelin, resté d'une VM effacée à la main dans VMware, se supprime avec l'Explorateur.
+
+### Arrêt et instantanés
+
+**« Arrêt propre impossible : les VMware Tools ne répondent pas »**
+Le système invité n'a pas les outils d'intégration, ou n'a pas fini de démarrer. Éteignez depuis l'intérieur de la VM, ou `vazy stop <nom> --hard`, qui équivaut à débrancher la prise. Installez les outils dans le modèle pour que cela ne se reproduise plus.
+
+**« La VM ... n'a pas de point de retour vazy-neuf »**
+La VM date d'avant la version qui prend cet instantané automatiquement, ou l'instantané a été supprimé dans VMware. Créez-le une fois, VM éteinte : `vazy stop <nom>` puis `vazy snap <nom> vazy-neuf`.
+
+**« Le retour à l'instantané ... a échoué »**
+VMware met parfois quelques secondes à libérer une VM après un arrêt forcé : relancez la commande. Vérifiez aussi que l'instantané existe encore avec `vazy snaps <nom>`, il a pu être supprimé depuis l'interface de VMware.
+
+### VM éphémères
+
+**Ma VM éphémère n'a pas été supprimée**
+Elle tourne encore : fermer sa fenêtre ne l'éteint pas si VMware est réglé pour garder les VM en arrière-plan. `vazy list` la montre alors « en marche ». Éteignez-la depuis l'intérieur ou avec `vazy stop`. Si elle est éteinte et toujours là, lancez `vazy gc` : le message dira pourquoi.
+
+**« ... VM éphémères éteintes à supprimer : c'est beaucoup pour un nettoyage automatique »**
+Plus de trois VM éphémères se sont retrouvées éteintes en même temps, ce qui ressemble à une anomalie comme une coupure ou un arrêt de l'hôte. Vérifiez avec `vazy list`, puis `vazy gc --yes`.
+
+### Labos
+
+**« Fichier ..., machine « x » : clé inconnue ... » ou « n'est pas du JSON valide »**
+Le fichier est vérifié en entier avant toute action. Le message nomme la machine et la clé fautive. Erreur classique : une virgule après le dernier élément d'un objet ou d'une liste.
+
+**« dépendances circulaires entre ... »**
+Les clés `apres` de ces machines forment une boucle. L'une d'elles doit pouvoir démarrer sans attendre les autres.
+
+**« La VM ... existe déjà mais appartient à ... »**
+Le nom préfixé est déjà pris par une VM qui n'a pas été créée par ce labo. Changez le nom du labo ou de la machine, ou supprimez cette VM.
+
+**« ... modèle(s) requis manquant(s) »**
+Le fichier vient d'ailleurs et référence un modèle sous un nom que vous n'avez pas. Préparez-le, ou déclarez une correspondance : `vazy template alias <votre modèle> <nom attendu>`.
+
+**« Labo inconnu : ... »**
+Aucun fichier de ce nom dans le dossier courant ni dans le dossier des labos. Le message propose les deux façons d'en créer un.
+
+### Nom d'hôte
+
+**Rien ne se passe au démarrage, sur un modèle guestinfo**
+Dans la VM, regardez `systemctl status vazy-guestinfo` sous Linux, ou le journal `C:\ProgramData\vazy\vazy-guestinfo.log` sous Windows. Vérifiez ensuite que `vmtoolsd --cmd "info-get guestinfo.vazy_config"` renvoie une valeur : si vous obtenez « No value found », vazy n'a rien déposé, et le modèle n'est probablement pas marqué. Si une valeur en base64 apparaît, c'est le script qui ne s'est pas exécuté, souvent parce qu'il a été installé après l'instantané.
+
+**« outils invité injoignables après 120 s »**
+Les outils ne sont pas installés dans le modèle, ou l'invité met plus longtemps à démarrer. Installez-les, ou allongez l'attente avec `vazy config delaiOutilsSec 300`. La VM tourne quand même, et le nom sera réessayé au prochain démarrage.
+
+**« Exécution dans l'invité impossible : ... exit code ... »**
+Le script a tourné mais a échoué. Sous Linux, le compte ne peut pas faire `sudo` sans mot de passe. Sous Windows, il n'est pas administrateur élevé : utilisez le compte `Administrateur` intégré.
+
+**« L'invité a refusé le compte ... »**
+Utilisateur ou mot de passe faux, ou compte qui ne peut pas ouvrir de session. Ressaisissez avec `vazy template creds <alias>`.
+
+**« Les identifiants d'invité du modèle ... sont illisibles »**
+Le fichier a été chiffré par un autre compte Windows ou sur un autre PC. Il est inutilisable ici, et c'est voulu. Ressaisissez-les.
+
+### Écran distant
+
+**Le lien s'ouvre mais l'écran reste noir**
+L'accélération 3D bloque le serveur VNC intégré. Désactivez-la : `--set mks.enable3d=FALSE`, puis redémarrez la VM.
+
+**Le lien n'ouvre rien sur le téléphone**
+Aucune appli VNC installée, ou elle ne gère pas les liens `vnc://`. Installez bVNC ou RealVNC Viewer, ou recopiez l'adresse, le port et le mot de passe affichés sous le lien.
+
+**Connexion refusée depuis le téléphone**
+Trois causes possibles, dans cet ordre : la règle de pare-feu n'a pas été créée, la VM n'a pas été redémarrée depuis l'activation de l'écran distant, ou l'adresse affichée n'est pas joignable depuis le téléphone. Dans ce dernier cas, installez Tailscale.
+
+### Divers
+
+**Une VM supprimée apparaît encore dans la bibliothèque de VMware Workstation**
 La bibliothèque est une liste de raccourcis gérée par l'interface graphique. Clic droit sur l'entrée grisée, `Remove from Library`.
 
 **La VM démarrée avec `--nogui` est invisible**
-Elle tourne en arrière-plan. Pour la voir : dans VMware Workstation, `File > Open` sur son `.vmx` (chemin affiché par `vazy list`).
+Elle tourne en arrière-plan. Pour la voir, `File > Open` dans VMware Workstation sur son fichier `.vmx`, dont le chemin est affiché par `vazy list`. Ou activez son écran distant.
 
 **Ctrl+C pendant le clonage**
 VMware peut laisser un dossier incomplet. Supprimez-le à la main, puis relancez.
 
 ---
 
-## 8. Limites de cette version
+## 17. Limites connues
 
-Volontairement hors périmètre :
+Ce qui est volontairement hors périmètre :
 
-- **Redimensionner le disque** : compliqué sur un clone lié et inutile si le modèle a été créé avec un disque dynamique très large (section 3.1).
-- **Réseaux personnalisés (VMnet2, VMnet3...)** : ils se créent dans le Virtual Network Editor avec les droits administrateur. vazy ne les gère pas, ni en ligne de commande ni dans un fichier de labo : `mode` ne connaît que `nat`, `bridged` et `hostonly`. Une fois un VMnet créé à la main, `--set ethernet0.connectionType=custom --set ethernet0.vnet=VMnet2` permet quand même de s'y brancher, sans aucune vérification.
-- **Autres hyperviseurs** : seul VMware Workstation est pris en charge ; l'architecture est prête pour VirtualBox et Hyper-V (section 9).
-- **Interface graphique** : aucune.
-- **Identité de l'invité** : le nom d'hôte est appliqué par vazy (section « Personnalisation de l'invité ») ; avec un modèle guestinfo, les clés SSH du serveur et `/etc/machine-id` sont régénérés sur chaque clone. Restent identiques : le SID Windows (sysprep) et la configuration IP (DHCP pour l'instant).
-- **Une commande vazy à la fois** : le catalogue est lu au début de chaque commande et réécrit à la fin. Deux commandes vazy lancées en parallèle dans deux terminaux peuvent s'écraser mutuellement leurs modifications du catalogue.
+- **Redimensionner le disque.** Compliqué sur un clone lié, et inutile si le modèle a été créé avec un disque dynamique très large, comme recommandé à la [section 4.1](#41-créer-la-vm-dans-vmware-workstation).
+- **Réseaux personnalisés VMnet2 et suivants.** Ils se créent dans le Virtual Network Editor avec les droits administrateur. vazy ne les gère pas : `mode` ne connaît que `nat`, `bridged` et `hostonly`. Une fois un segment créé à la main, `--set ethernet0.connectionType=custom --set ethernet0.vnet=VMnet2` permet de s'y brancher, sans aucune vérification. **À savoir avant un TP de routage** : toutes les machines en `hostonly` partagent le même segment, et deux labos montés en même temps se voient.
+- **Autres hyperviseurs.** Seul VMware Workstation est pris en charge. L'architecture est prête pour VirtualBox et Hyper-V, voir la [section 18](#18-architecture).
+- **Interface graphique.** Aucune, et ce n'est pas prévu.
+- **Identité complète de l'invité.** Le nom d'hôte est appliqué, et un modèle guestinfo régénère les clés SSH du serveur et l'identifiant machine. Restent identiques d'un clone à l'autre : le SID Windows, qui demande `sysprep`, et la configuration IP, qui reste en DHCP.
+- **Une commande vazy à la fois.** Le catalogue est lu au début de chaque commande et réécrit à la fin. Deux commandes lancées en parallèle dans deux terminaux peuvent s'écraser mutuellement leurs modifications.
+- **Bibliothèque de labos distante.** `lab up <nom>` ne va pas chercher un labo dans un dépôt public. Le format est prêt, le protocole n'existe pas.
 
 ---
 
-## 9. Architecture : trois couches, un pilote
+## 18. Architecture
 
 ```
-vazy.cmd                    lanceur (powershell -File lib\interface.ps1)
+vazy.cmd                    lanceur : powershell -File lib\interface.ps1
 lib\interface.ps1           couche 1 : arguments, validation, affichage
 lib\logique.ps1             couche 2 : catalogue, vérifications, enchaînement
 lib\pilote-vmware.ps1       couche 3 : vmrun.exe et fichiers .vmx
 ```
 
-- La **couche 1** analyse `$args` (options `--x valeur` ou `--x=valeur`), valide les valeurs, appelle la couche 2 et affiche ce qu'elle publie (`Publish-Message`) via l'afficheur qu'elle a enregistré (`Set-Afficheur`).
-- La **couche 2** ne connaît ni la ligne de commande ni l'hyperviseur. Elle charge le pilote désigné par la configuration (`lib\pilote-<hyperviseur>.ps1`) et ne lui parle qu'à travers le contrat ci-dessous. Un chemin de machine est pour elle une chaîne opaque.
-- La **couche 3** est la seule à contenir du VMware : localisation de `vmrun.exe`, syntaxe des commandes, lecture et écriture des `.vmx` (avec conservation de l'encodage déclaré par la ligne `.encoding`).
+La **couche 1** analyse les arguments, valide les valeurs, appelle la couche 2, et affiche ce qu'elle publie via l'afficheur qu'elle lui a fourni. Elle lit aussi les fichiers de labo, car leur format est une syntaxe d'entrée comme une autre.
 
-### Contrat du pilote
+La **couche 2** ne connaît ni la ligne de commande ni l'hyperviseur. Elle charge le pilote désigné par la configuration et ne lui parle qu'à travers le contrat ci-dessous. Un chemin de machine est pour elle une chaîne opaque.
 
-Les six opérations demandées :
+La **couche 3** est la seule à contenir du VMware : localisation de `vmrun.exe`, syntaxe des commandes, lecture et écriture des `.vmx` en conservant leur encodage déclaré.
+
+### 18.1 Contrat du pilote
+
+Les six opérations fondamentales :
 
 | Fonction | Rôle |
 |---|---|
 | `New-MachineDepuisModele -Modele -Instantane -Dossier -Nom` | Créer depuis un modèle ; renvoie le chemin de la machine |
-| `Set-MachineParametres -Machine [-RamMo] [-Cpu] [-Brut]` | Régler les paramètres (`-Brut` : paires Cle/Valeur écrites telles quelles) |
-| `Set-MachineReseau -Machine -Modes` | Brancher le réseau (un mode par carte : `nat`, `bridged`, `hostonly`) |
+| `Set-MachineParametres -Machine [-RamMo] [-Cpu] [-Brut]` | Régler les paramètres ; `-Brut` écrit des paires clé-valeur telles quelles |
+| `Set-MachineReseau -Machine -Modes` | Brancher le réseau, un mode par carte |
 | `Start-Machine -Machine [-SansInterface]` | Démarrer |
 | `Stop-Machine -Machine [-Brutal]` | Arrêter |
 | `Remove-Machine -Machine` | Supprimer |
 
-Et trois fonctions de lecture seule, sans lesquelles la logique ne peut ni afficher l'état des VM ni vérifier qu'un modèle a un instantané :
+La lecture seule, sans laquelle la logique ne peut rien décider :
 
 | Fonction | Rôle |
 |---|---|
-| `Initialize-Pilote [-CheminForce]` | Localise l'outil de l'hyperviseur ; renvoie `Nom`, `Executable`, `ExtensionMachine`, `SensibleHyperV`, `ConseilInstantane` |
+| `Initialize-Pilote [-CheminForce]` | Localise l'outil ; renvoie `Nom`, `Executable`, `ExtensionMachine`, `SensibleHyperV`, `ConseilInstantane` |
 | `Get-MachineEnCours` | Chemins des machines en cours d'exécution |
 | `Get-MachineInstantanes -Machine` | Noms des instantanés d'une machine |
 
-Les instantanés (remise à zéro) :
+Les instantanés :
 
 | Fonction | Rôle |
 |---|---|
 | `New-MachineInstantane -Machine -Nom` | Prendre un instantané |
-| `Restore-MachineInstantane -Machine -Nom` | Revenir à un instantané (machine arrêtée) |
+| `Restore-MachineInstantane -Machine -Nom` | Revenir à un instantané, machine arrêtée |
 | `Remove-MachineInstantane -Machine -Nom` | Supprimer un instantané |
 
-L'invité (personnalisation) :
+L'invité et l'affichage distant :
 
 | Fonction | Rôle |
 |---|---|
-| `Set-MachineVariableInvite -Machine -Nom [-Valeur]` | Dépose une variable guestinfo lisible dans l'invité (machine éteinte ; valeur vide = retire) |
-| `Set-MachineAffichageDistant -Machine -Actif [-Port] [-MotDePasse]` | Active ou retire le serveur d'affichage distant intégré à l'hyperviseur |
-| `Get-MachineSystemeInvite -Machine` | `linux`, `windows` ou `inconnu`, d'après la configuration de la machine |
-| `Wait-MachineOutils -Machine [-DelaiMaxSec]` | `$true` dès que les outils invité répondent, `$false` passé le délai |
-| `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité avec un `PSCredential` (repli) et renvoie son code de sortie ; retente si l'invité n'est pas encore prêt ; le mot de passe n'apparaît dans aucun message |
+| `Set-MachineVariableInvite -Machine -Nom [-Valeur]` | Dépose une variable lisible dans l'invité, machine éteinte |
+| `Set-MachineAffichageDistant -Machine -Actif [-Port] [-MotDePasse]` | Active ou retire le serveur d'affichage distant |
+| `Get-MachineSystemeInvite -Machine` | `linux`, `windows` ou `inconnu` |
+| `Wait-MachineOutils -Machine [-DelaiMaxSec]` | Vrai dès que les outils invité répondent |
+| `Invoke-MachineScript -Machine -Identifiants -Systeme -Script` | Exécute un script dans l'invité et renvoie son code de sortie ; retente si l'invité n'est pas prêt ; aucun mot de passe dans les messages |
 
 La protection du modèle et l'autonomie :
 
 | Fonction | Rôle |
 |---|---|
-| `Get-MachineEmpreinte -Machine` | Disques de base de la machine : nom, taille, date |
-| `Test-MachineEmpreinte -Machine -Empreinte` | Compare à une empreinte : erreurs (disque manquant ou modifié) et avertissements |
+| `Get-MachineEmpreinte -Machine` | Disques de base : nom, taille, date |
+| `Test-MachineEmpreinte -Machine -Empreinte` | Compare à une empreinte ; renvoie erreurs et avertissements |
 | `Convert-MachineEnComplete -Machine -Nom` | Convertit un clone lié en machine complète, au même chemin |
-| `Get-MachineDisqueGo -Machine` | Capacité déclarée des disques, en Go |
+| `Get-MachineDisqueGo -Machine` | Capacité déclarée des disques |
+| `Protect-MachineModele`, `Unprotect-MachineModele`, `Test-MachineModele` | Pose, retire et teste la marque de modèle |
 
-L'observation, sur laquelle reposent le journal et `--dry-run` :
-
-| Fonction | Rôle |
-|---|---|
-| `Set-PiloteObservateur -Observateur -Simulation` | L'observateur reçoit `journal` pour chaque commande exécutée, `simulation` pour chaque commande non exécutée |
-
-Toute commande de l'hyperviseur est construite en un seul endroit (`Invoke-Vmrun`) et toute écriture de configuration passe par `Write-FichierVmx` : ce sont les deux seuls points où le journal et la simulation s'accrochent.
-
-La marque « modèle », que le pilote vérifie lui-même avant de démarrer, supprimer ou toucher aux instantanés d'une machine :
+L'observation, sur laquelle reposent le journal et la simulation :
 
 | Fonction | Rôle |
 |---|---|
-| `Protect-MachineModele -Machine` | Poser la marque (fichier témoin à côté de la machine) |
-| `Unprotect-MachineModele -Machine` | La retirer |
-| `Test-MachineModele -Machine` | `$true` si la machine est marquée |
+| `Set-PiloteObservateur -Observateur -Simulation` | L'observateur reçoit chaque commande exécutée, ou chaque commande évitée en simulation |
 
-Toute erreur est une exception dont `Data['Conseil']` dit quoi faire ; la couche 1 l'affiche en jaune sous le message.
+Deux points d'accroche uniques rendent tout cela possible : **toute** commande de l'hyperviseur est construite dans `Invoke-Vmrun`, et **toute** écriture de configuration passe par `Write-FichierVmx`.
 
-### Ajouter un pilote
+Toute erreur est une exception dont la donnée `Conseil` dit quoi faire ; la couche 1 l'affiche en jaune sous le message.
 
-1. Créez `lib\pilote-virtualbox.ps1` qui définit ces fonctions avec les mêmes paramètres et les mêmes retours (le chemin de machine devient par exemple celui du `.vbox`, `ExtensionMachine = '.vbox'`).
+### 18.2 Ajouter un pilote
+
+1. Créez `lib\pilote-virtualbox.ps1` qui définit ces fonctions avec les mêmes paramètres et les mêmes retours. Le chemin de machine devient celui du `.vbox`, et `ExtensionMachine` vaut `.vbox`.
 2. `vazy config hyperviseur virtualbox`.
 
 Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre à un hyperviseur.
+
+---
+
+## 19. Historique des versions
+
+| Version | Apports |
+|---|---|
+| 1.0 | Création de VM par clone lié, options, `--set`, catalogue, modèles, configuration |
+| 1.1 | Remise à zéro et instantanés : `reset`, `snap`, `snaps`, `back`, `unsnap`, point de retour `vazy-neuf`, marque de protection des modèles |
+| 1.2 | VM éphémères `--tmp`, nettoyage paresseux, `gc` |
+| 1.3 | Labos : `lab up`, `lab status`, `lab down`, fichier JSON, dépendances et délai |
+| 1.4 | Personnalisation de l'invité par identifiants, `template creds`, `--hostname` |
+| 1.5 | Personnalisation sans identifiant par guestinfo, scripts à installer dans le modèle, `template mark` |
+| 1.6 | `doctor`, `--dry-run`, journal, empreinte du modèle, `freeze`, `lab export`, prérequis et `template alias` |
+| 1.7 | Écran distant `--vnc`, lien `vnc://`, `vazy vnc`, documentation SSH et Tailscale |
+| 1.8 | Labo en une ligne avec `--vm`, `--save`, assistant `lab new`, labos retrouvés par leur nom |
