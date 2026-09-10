@@ -2522,7 +2522,13 @@ $script:Catalogue = Read-Catalogue
 # Le pilote est choisi par la configuration : lib\pilote-<hyperviseur>.ps1.
 # Il est chargé ici, au niveau du script, pour que ses fonctions restent
 # visibles ensuite (un chargement dans une fonction les ferait disparaître).
-$cheminPilote = Join-Path $script:DossierLib ('pilote-' + $script:Config['hyperviseur'] + '.ps1')
+#
+# $env:VAZY_PILOTE impose un fichier de pilote précis, en court-circuitant la
+# configuration. C'est le seul point d'entrée des tests : ils y placent un faux
+# pilote qui tient l'état en mémoire, ce qui permet de vérifier toute la
+# logique sans hyperviseur installé (voir tests\README.md). En usage normal la
+# variable n'est jamais définie et rien ne change.
+$cheminPilote = if ($env:VAZY_PILOTE) { $env:VAZY_PILOTE } else { Join-Path $script:DossierLib ('pilote-' + $script:Config['hyperviseur'] + '.ps1') }
 if (-not (Test-Path -LiteralPath $cheminPilote -PathType Leaf)) {
     throw (New-ErreurOutil "Le pilote « $($script:Config['hyperviseur']) » n'existe pas ($cheminPilote)." `
         "Corrigez la clé hyperviseur dans $($script:CheminConfig) (valeur attendue : vmware).")
