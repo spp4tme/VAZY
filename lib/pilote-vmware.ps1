@@ -670,10 +670,18 @@ function Wait-MachineOutils {
     param([Parameter(Mandatory = $true)][string]$Machine, [int]$DelaiMaxSec = 120)
     if ($script:Simulation) { & $script:Observateur 'simulation' "attente des outils invité de $Machine (au plus $DelaiMaxSec s)"; return $true }
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    $dernierSignal = 0
     while ($true) {
         $r = Invoke-Vmrun @('checkToolsState', $Machine)
         if ($r.Code -eq 0 -and (($r.Lignes -join ' ') -match '\brunning\b')) { return $true }
-        if ($chrono.Elapsed.TotalSeconds -ge $DelaiMaxSec) { return $false }
+        $ecoule = [int]$chrono.Elapsed.TotalSeconds
+        if ($ecoule -ge $DelaiMaxSec) { return $false }
+        # Un signe de vie toutes les 15 s : cette attente dure parfois deux
+        # minutes, et sans rien à l'écran l'utilisateur croit l'outil bloqué.
+        if ($ecoule - $dernierSignal -ge 15) {
+            $dernierSignal = $ecoule
+            & $script:Observateur 'progression' ("outils invité pas encore prêts ({0} s sur {1})..." -f $ecoule, $DelaiMaxSec)
+        }
         Start-Sleep -Seconds 3
     }
 }

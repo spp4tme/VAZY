@@ -598,11 +598,17 @@ function Wait-MachineOutils {
     if ($script:Simulation) { & $script:Observateur 'simulation' "attente des additions invité de $Machine (au plus $DelaiMaxSec s)"; return $true }
     $nomVm = Get-NomMachine -Machine $Machine
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    $dernierSignal = 0
     while ($true) {
         # Les additions invité publient cette propriété dès qu'elles tournent.
         $r = Invoke-VBoxManage @('guestproperty', 'get', $nomVm, '/VirtualBox/GuestInfo/OS/Product') -Lecture
         if ($r.Code -eq 0 -and $r.Sortie -match '(?i)^\s*Value:\s*\S') { return $true }
-        if ($chrono.Elapsed.TotalSeconds -ge $DelaiMaxSec) { return $false }
+        $ecoule = [int]$chrono.Elapsed.TotalSeconds
+        if ($ecoule -ge $DelaiMaxSec) { return $false }
+        if ($ecoule - $dernierSignal -ge 15) {
+            $dernierSignal = $ecoule
+            & $script:Observateur 'progression' ("additions invité pas encore prêtes ({0} s sur {1})..." -f $ecoule, $DelaiMaxSec)
+        }
         Start-Sleep -Seconds 3
     }
 }

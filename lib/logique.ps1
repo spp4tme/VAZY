@@ -88,7 +88,10 @@ function Set-ModeSimulation {
     $script:Simulation = $Actif
     Set-PiloteObservateur -Observateur {
         param($Type, $Message)
-        if ($Type -eq 'simulation') { Publish-Message 'simulation' $Message }
+        # « progression » : signe de vie pendant une opération longue. Il va à
+        # l'écran et non au journal, qui n'a que faire d'une attente en cours.
+        if ($Type -eq 'simulation')      { Publish-Message 'simulation' $Message }
+        elseif ($Type -eq 'progression') { Publish-Message 'info' $Message }
         else { Write-Journal $Message }
     } -Simulation $Actif
 }
