@@ -1,5 +1,7 @@
 # vazy
 
+[![CI](https://github.com/spp4tme/VAZY/actions/workflows/ci.yml/badge.svg)](https://github.com/spp4tme/VAZY/actions/workflows/ci.yml)
+
 **Une commande, une VM.**
 
 ```

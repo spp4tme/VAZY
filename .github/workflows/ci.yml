@@ -1,0 +1,153 @@
+name: CI
+
+# vazy vise Windows 11 + PowerShell 5.1 : la CI tourne donc sur Windows, avec
+# « shell: powershell » (Windows PowerShell 5.1) et non pwsh. Aucun hyperviseur
+# n'est installé sur le runner : les tests s'appuient sur le faux pilote.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+
+  lint:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module PSScriptAnalyzer
+          Write-Host ("PSScriptAnalyzer " + (Get-Module PSScriptAnalyzer).Version)
+
+      - name: Analyser le code
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $diagnostics = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1)
+          if ($diagnostics.Count -gt 0) {
+              $diagnostics |
+                  Sort-Object Severity, ScriptName, Line |
+                  Format-Table Severity, ScriptName, Line, RuleName, Message -AutoSize -Wrap |
+                  Out-String -Width 200 |
+                  Write-Host
+          }
+          $bloquants = @($diagnostics | Where-Object { $_.Severity -eq 'Error' -or $_.Severity -eq 'Warning' })
+          Write-Host ("{0} diagnostic(s), dont {1} bloquant(s)." -f $diagnostics.Count, $bloquants.Count)
+          if ($bloquants.Count -gt 0) { exit 1 }
+
+  tests:
+    name: Pester
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Choisir Pester 3.4.0
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pester 3.4.0 est livré avec Windows : c'est la version que les
+          # développeurs ont sous la main sans rien installer, donc celle que
+          # la CI impose. Les images GitHub embarquent aussi Pester 5, dont la
+          # syntaxe d'assertion est incompatible ; on ne veut surtout pas
+          # qu'il soit choisi à la place.
+          $p = Get-Module -ListAvailable Pester |
+               Where-Object { $_.Version.Major -eq 3 } |
+               Sort-Object Version -Descending |
+               Select-Object -First 1
+          if (-not $p) {
+              Write-Host 'Pester 3 absent de l''image : installation.'
+              Install-Module Pester -RequiredVersion 3.4.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+
+      - name: Lancer les tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = Get-Module -ListAvailable Pester |
+               Where-Object { $_.Version.Major -eq 3 } |
+               Sort-Object Version -Descending |
+               Select-Object -First 1
+          Import-Module Pester -RequiredVersion $p.Version -Force
+          Write-Host ("Pester " + (Get-Module Pester).Version)
+
+          $resultat = Invoke-Pester -Path .\tests -PassThru `
+                                    -OutputFile .\resultats-pester.xml -OutputFormat NUnitXml
+          Write-Host ("{0} test(s) : {1} reussi(s), {2} echoue(s)." -f `
+                      $resultat.TotalCount, $resultat.PassedCount, $resultat.FailedCount)
+          if ($resultat.FailedCount -gt 0) { exit 1 }
+
+      - name: Publier le rapport de tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultats-pester
+          path: resultats-pester.xml
+          if-no-files-found: warn
+
+  syntaxe:
+    name: Syntaxe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifier tous les .ps1 avec l'analyseur syntaxique
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pas de manifeste .psd1 à valider (vazy n'est pas un module : c'est
+          # un outil en ligne de commande chargé par point-source). On vérifie
+          # donc que chaque fichier est syntaxiquement analysable, ce qui
+          # attrape les fautes de frappe qu'un test ne couvrant pas la ligne
+          # laisserait passer jusqu'à l'exécution.
+          $manifestes = @(Get-ChildItem -Path . -Recurse -Filter *.psd1 |
+                          Where-Object { $_.Name -ne 'PSScriptAnalyzerSettings.psd1' })
+          foreach ($m in $manifestes) {
+              Write-Host ("Manifeste : " + $m.FullName)
+              Test-ModuleManifest -Path $m.FullName | Out-Null
+          }
+
+          $enErreur = 0
+          foreach ($f in Get-ChildItem -Path . -Recurse -Include *.ps1, *.psm1) {
+              $jetons = $null
+              $erreurs = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$jetons, [ref]$erreurs) | Out-Null
+              if ($erreurs -and $erreurs.Count -gt 0) {
+                  $enErreur++
+                  Write-Host ("ERREUR : " + $f.FullName)
+                  foreach ($e in $erreurs) {
+                      Write-Host ("   ligne {0} : {1}" -f $e.Extent.StartLineNumber, $e.Message)
+                  }
+              }
+          }
+          Write-Host ("{0} fichier(s) en erreur." -f $enErreur)
+          if ($enErreur -gt 0) { exit 1 }
+
+      - name: Verifier l'encodage des fichiers PowerShell
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # PowerShell 5.1 lit un fichier UTF-8 sans BOM comme de l'ANSI : les
+          # accents deviennent illisibles et les motifs accentués ne
+          # correspondent plus à rien. Tous les .ps1 du projet doivent donc
+          # porter la marque d'ordre des octets.
+          $sansBom = @()
+          foreach ($f in Get-ChildItem -Path . -Recurse -Include *.ps1, *.psd1) {
+              $octets = [System.IO.File]::ReadAllBytes($f.FullName)
+              if ($octets.Length -lt 3 -or $octets[0] -ne 0xEF -or $octets[1] -ne 0xBB -or $octets[2] -ne 0xBF) {
+                  $sansBom += $f.FullName
+              }
+          }
+          if ($sansBom.Count -gt 0) {
+              Write-Host "Fichiers UTF-8 sans BOM (les accents y seront illisibles en PowerShell 5.1) :"
+              $sansBom | ForEach-Object { Write-Host ("   " + $_) }
+              exit 1
+          }
+          Write-Host "Tous les fichiers PowerShell portent le BOM."
