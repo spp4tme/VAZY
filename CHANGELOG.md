@@ -5,9 +5,16 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
+Rien pour l'instant.
+
+## [1.9.0] — 2026-09-10
+
+La version qui rend l'outil vérifiable : des tests, une CI, un second pilote
+pour prouver que l'architecture tient, et de quoi être réutilisé par d'autres.
+
 ### Ajouté
 
-- Suite de tests Pester (66 tests) qui tourne **sans VMware installé** : la
+- Suite de tests Pester qui tourne **sans VMware installé** : la
   couche pilote est remplacée par un faux pilote tenant l'état en mémoire et
   journalisant les appels reçus. Voir `tests/README.md`.
 - Intégration continue GitHub Actions sur Windows : PSScriptAnalyzer, Pester,
@@ -53,6 +60,20 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 - Le protocole de l'écran distant vient du pilote (`SchemaAffichageDistant`) au
   lieu d'être figé sur `vnc://` dans la logique. Aucun changement visible sous
   VMware ; c'était la seule hypothèse d'hyperviseur restée dans la couche 2.
+- L'observateur du pilote reçoit un troisième type, `progression` : signe de vie
+  pendant une opération longue, dirigé vers l'écran et non vers le journal.
+- Catalogue en version 9 (section `reseaux`), migration automatique.
+
+### Documentation
+
+- `docs/PIEGES.md` : les pièges rencontrés, avec ce qui les révèle et ce qui les
+  corrige — blocage sur les tuyaux hérités, angles de PowerShell 5.1, règles des
+  clones liés, comportements de VMware, et façons d'écrire un test qui passe
+  pour de mauvaises raisons.
+- `docs/README.md` : où trouver quoi.
+- L'en-tête de `lib/pilote-vmware.ps1`, qui **est** la spécification du contrat,
+  était incomplet : trois fonctions et une clé de description y manquaient. Deux
+  tests vérifient désormais qu'aucune ne peut manquer.
 
 ## [1.8.0] — 2026-09-09
 

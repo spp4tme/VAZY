@@ -26,9 +26,15 @@
 #
 #  Trois fonctions de lecture seule dont la logique a besoin :
 #    Initialize-Pilote        [-CheminForce]
-#                              -> description : Nom, Executable, ExtensionMachine,
-#                                 SensibleHyperV (dégradé si Hyper-V est actif ?),
-#                                 ConseilInstantane ({0} = exécutable, {1} = machine)
+#                              -> description du pilote, six clés :
+#                                 Nom                    nom affiché de l'hyperviseur
+#                                 Executable             chemin de son outil en ligne de commande
+#                                 ExtensionMachine       « .vmx », « .vbox »...
+#                                 SensibleHyperV         dégradé si Hyper-V est actif ?
+#                                 ConseilInstantane      {0} = exécutable, {1} = machine
+#                                 SchemaAffichageDistant « vnc » ou « rdp » : protocole de
+#                                                        l'écran distant, dont la logique tire
+#                                                        le lien affiché à l'utilisateur
 #    Get-MachineEnCours        -> chemins des machines en cours d'exécution
 #    Get-MachineInstantanes   -Machine
 #                              -> noms des instantanés de la machine
@@ -71,12 +77,32 @@
 #    Convert-MachineEnComplete -Machine -Nom     clone lié -> machine complète, même chemin
 #    Get-MachineDisqueGo       -Machine          -> capacité déclarée des disques, en Go
 #
+#  Segments réseau personnalisés (réseaux isolés, pour les TP de routage ou de
+#  segmentation, là où « hostonly » met toutes les VM ensemble) :
+#    Get-ReseauxNommes         -> segments existants : @{ Identifiant ; Adresse ;
+#                                 Masque ; Dhcp }, un par segment
+#    New-ReseauNomme           [-Identifiant] [-Adresse] [-Masque] [-Dhcp]
+#                              -> identifiant réellement créé. Sans -Identifiant,
+#                                 le pilote en choisit un de libre lui-même.
+#    Remove-ReseauNomme        -Identifiant
+#
+#    L'identifiant est OPAQUE pour la logique : elle le transporte, elle ne
+#    l'interprète jamais. Une carte branchée sur un segment est demandée à
+#    Set-MachineReseau sous la forme « nomme:<identifiant> », en plus des modes
+#    nat, bridged et hostonly.
+#
 #  Observation (journal et --dry-run) :
 #    Set-PiloteObservateur     -Observateur -Simulation
-#       L'observateur (scriptblock Type, Message) reçoit 'journal' pour chaque
-#       commande exécutée et 'simulation' pour chaque commande NON exécutée en
-#       mode simulation. Toute commande vmrun est construite en un seul point
-#       (Invoke-Vmrun), toute écriture de .vmx passe par Write-FichierVmx.
+#       L'observateur (scriptblock Type, Message) reçoit trois types :
+#         'journal'     chaque commande exécutée -> journal.log
+#         'simulation'  chaque commande NON exécutée en mode --dry-run
+#         'progression' signe de vie pendant une opération longue -> écran
+#                       seulement (une attente en cours n'a rien à faire dans
+#                       un journal d'opérations)
+#       Toute commande vmrun est construite en un seul point (Invoke-Vmrun),
+#       toute écriture de .vmx passe par Write-FichierVmx. C'est ce qui rend le
+#       journal, --dry-run et le masquage des mots de passe garantis plutôt
+#       qu'espérés.
 #
 #  Toute erreur est levée sous forme d'exception dont Data['Conseil'] indique
 #  quoi faire pour corriger (voir New-ErreurPilote).

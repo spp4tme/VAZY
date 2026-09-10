@@ -1189,11 +1189,27 @@ La protection du modèle et l'autonomie :
 | `Get-MachineDisqueGo -Machine` | Capacité déclarée des disques |
 | `Protect-MachineModele`, `Unprotect-MachineModele`, `Test-MachineModele` | Pose, retire et teste la marque de modèle |
 
-L'observation, sur laquelle reposent le journal et la simulation :
+Les segments réseau isolés (voir [section 5.4](#54-segments-réseau-isolés)) :
 
 | Fonction | Rôle |
 |---|---|
-| `Set-PiloteObservateur -Observateur -Simulation` | L'observateur reçoit chaque commande exécutée, ou chaque commande évitée en simulation |
+| `Get-ReseauxNommes` | Segments existants : identifiant, adresse, masque, DHCP |
+| `New-ReseauNomme [-Identifiant] [-Adresse] [-Masque] [-Dhcp]` | Crée un segment et renvoie son identifiant ; sans `-Identifiant`, le pilote en choisit un de libre |
+| `Remove-ReseauNomme -Identifiant` | Le supprime |
+
+L'identifiant rendu est **opaque** pour la couche logique : elle le transporte, elle ne l'interprète jamais. C'est ce qui permet à VMware (VMnet, `vnetlib`, droits administrateur) et à VirtualBox (réseaux internes, aucun droit requis) de répondre au même contrat. Une carte branchée sur un segment est demandée à `Set-MachineReseau` sous la forme `nomme:<identifiant>`.
+
+L'observation, sur laquelle reposent le journal, la simulation et les signes de vie :
+
+| Fonction | Rôle |
+|---|---|
+| `Set-PiloteObservateur -Observateur -Simulation` | L'observateur reçoit trois types de message |
+
+| Type | Destination | Quand |
+|---|---|---|
+| `journal` | `journal.log` | chaque commande exécutée |
+| `simulation` | écran | chaque commande évitée en `--dry-run` |
+| `progression` | écran | signe de vie pendant une opération longue |
 
 Deux points d'accroche uniques rendent tout cela possible : **toute** commande de l'hyperviseur est construite dans `Invoke-Vmrun`, et **toute** écriture de configuration passe par `Write-FichierVmx`.
 
@@ -1229,15 +1245,23 @@ En un coup d'œil : la 1.0 crée des VM par clone lié ; la 1.4 apporte les
 instantanés, les VM éphémères et les labos ; la 1.5 la personnalisation de
 l'invité sans identifiant ; la 1.6 le diagnostic, le mode simulation et la
 protection du modèle ; la 1.7 l'écran distant ; la 1.8 les labos décrits en
-une ligne.
+une ligne ; la 1.9 les tests, la CI, le pilote VirtualBox et les segments
+réseau isolés.
 
 ---
 
 ## 20. Contribuer, tester, réutiliser
 
-- **Tests** : `Invoke-Pester -Path .\tests` — 104 tests qui tournent sans VMware
-  installé. Comment c'est possible : [tests/README.md](tests/README.md).
+- **Tests** : `Invoke-Pester -Path .\tests` — toute une suite de tests qui tourne sans VMware
+  installé. Comment c'est possible, et ce qu'ils ne peuvent pas voir :
+  [tests/README.md](tests/README.md).
 - **Contribuer** : [CONTRIBUTING.md](CONTRIBUTING.md) — la règle des trois
   couches, où va quoi, et ce qu'on vérifie avant de proposer un changement.
+- **Pièges déjà rencontrés** : [docs/PIEGES.md](docs/PIEGES.md) — à lire avant
+  de chercher longtemps. Blocages, angles de PowerShell 5.1, règles des clones
+  liés, comportements de VMware.
+- **VirtualBox** : [docs/PILOTE-VIRTUALBOX.md](docs/PILOTE-VIRTUALBOX.md) — le
+  second pilote et ses écarts réels avec VMware.
+- **Où trouver quoi** : [docs/README.md](docs/README.md).
 - **Licence** : [MIT](LICENSE). Réutilisez, modifiez, redistribuez ; gardez la
   mention de copyright.

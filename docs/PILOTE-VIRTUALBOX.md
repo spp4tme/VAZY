@@ -146,6 +146,17 @@ passer le mot de passe par une ligne de commande visible de toute la machine
 dans le gestionnaire des tâches. Le fichier temporaire est effacé dans un bloc
 `finally`.
 
+### Lancement des commandes
+
+`VBoxManage startvm` lance `VirtualBoxVM.exe`, qui hérite des tuyaux de sortie
+redirigés et les garde ouverts tant que la VM tourne — exactement le piège qui
+figeait vazy côté VMware. Le pilote emploie donc le même motif : lecture
+asynchrone, attente du **processus** avec un délai, puis on prend ce qui est
+arrivé. Voir [PIEGES.md, piège n°1](PIEGES.md#1-une-commande-qui-rend-la-main-mais-dont-on-attend-la-sortie).
+
+Ce point-là, au moins, est vérifié par des tests : ils reproduisent la situation
+avec `powershell.exe`, sans hyperviseur.
+
 ### Conversion en machine autonome (`freeze`)
 
 L'opération la plus délicate à porter. VMware clone en complet, supprime
@@ -168,7 +179,8 @@ Soyons précis sur ce qui est vérifié et ce qui ne l'est pas.
 | Conformité au contrat (fonctions, paramètres) | vérifiée automatiquement |
 | Validité syntaxique | vérifiée automatiquement |
 | Point de passage unique des commandes | vérifié automatiquement |
-| Non-régression des couches 1 et 2 | vérifiée par 104 tests |
+| Lancement des commandes sans blocage sur les tuyaux | vérifié automatiquement |
+| Non-régression des couches 1 et 2 | vérifiée par toute la suite |
 | **Comportement face à un vrai VirtualBox** | **jamais exécuté** |
 
 Ce pilote a été écrit d'après la documentation de `VBoxManage`, sans VirtualBox

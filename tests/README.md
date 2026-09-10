@@ -1,6 +1,6 @@
 # Tests de vazy
 
-104 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
+114 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
 
 ```powershell
 Invoke-Pester -Path .\tests
@@ -25,6 +25,19 @@ C'est tout l'intérêt de la séparation en couches, rendu concret.
 | `Aide\Environnement.ps1` | Le harnais : `%VAZY_HOME%` jetable, messages capturés, raccourcis de mise en place |
 | `Logic\` | Tests unitaires de la couche 2, pilote mocké |
 | `Integration\` | Chemins critiques à travers les trois couches, via `vazy.cmd` |
+
+Le détail, fichier par fichier :
+
+| Fichier | Ce qu'il garde |
+|---|---|
+| `Logic\Creation.Tests.ps1` | Valeurs par défaut, refus avant tout appel au pilote, nettoyage d'un clone incomplet, messages avant les temps longs |
+| `Logic\Ephemeres.Tests.ps1` | Le nettoyage ne supprime **jamais** une VM non marquée |
+| `Logic\Modele.Tests.ps1` | Marque de protection et empreinte des disques de base |
+| `Logic\Labo.Tests.ps1` | Ordre topologique, cycles, idempotence, retour arrière borné |
+| `Logic\Reseaux.Tests.ps1` | Segments isolés : résolution, segment disparu, suppression refusée, export relisible ailleurs |
+| `Logic\Contrat.Tests.ps1` | Les trois pilotes honorent le même contrat, les couches 1-2 ignorent l'hyperviseur, et l'en-tête qui spécifie le contrat reste complet |
+| `Logic\CommandeExterne.Tests.ps1` | Un processus petit-fils qui survit ne bloque pas vazy |
+| `Integration\LigneDeCommande.Tests.ps1` | Cycle de vie, `--dry-run`, lecture d'un fichier de labo, segments réseau, `doctor` |
 
 ## Comment le faux pilote est branché
 
@@ -112,13 +125,15 @@ It 'refuse un nom deja pris sans rien creer' {
   et lecture d'un fichier de labo (JSON invalide, virgule finale, clé inconnue
   au niveau du labo ou d'une machine — le message doit nommer les deux).
 
-La couche 1 (interface) n'est couverte que par les tests d'intégration, et la
-couche 3 pas du tout : la vérifier demanderait un vrai hyperviseur.
+La couche 1 (interface) n'est couverte que par les tests d'intégration. De la
+couche 3, seule la *manière* de lancer une commande est vérifiée — sans
+hyperviseur, avec `powershell.exe` en guise de cobaye. Ce que fait réellement
+`vmrun`, lui, échappe à tout.
 
-## Pièges de PowerShell 5.1 rencontrés ici
+## Pièges
 
-Ils sont notés parce qu'ils coûtent chacun une demi-heure quand on les
-redécouvre.
+Tous ceux rencontrés en écrivant ces tests — et ceux du produit lui-même — sont
+rassemblés dans **[docs/PIEGES.md](../docs/PIEGES.md)**. Les plus utiles ici :
 
 - **`@()` sur une `List[object]` vide** lève « Les types des arguments ne
   correspondent pas ». Utiliser `.ToArray()`.
@@ -131,6 +146,24 @@ redécouvre.
   accent, surtout pour la sortie d'un sous-processus qui traverse la console.
 - **Les fichiers `.ps1` sont en UTF-8 avec BOM.** Sans BOM, PowerShell 5.1 les
   lit en ANSI et les accents deviennent illisibles.
+- **Un test peut passer pour de mauvaises raisons** : se déclencher sur son
+  propre commentaire, ou chercher un nom qui apparaît aussi dans un exemple de
+  message. Les deux sont arrivés ; voir PIEGES, section 6.
+
+## Ce que ces tests ne peuvent pas voir
+
+Ils remplacent la couche pilote : le comportement réel de `vmrun`, les
+interactions avec les processus et les handles du système, et tout ce qui se
+passe dans l'invité leur échappent par construction.
+
+Ce n'est pas théorique. Le blocage qui figeait vazy au démarrage d'une VM
+— l'interface de l'hyperviseur retenant les tuyaux de sortie — est passé sous
+ces tests pendant tout le développement, et n'a été trouvé qu'au premier essai
+sur du vrai VMware.
+
+**Une livraison n'est pas finie tant qu'elle n'a pas tourné une fois pour de
+vrai.** Les tests attrapent les régressions de logique, pas les malentendus avec
+le monde extérieur.
 
 ## Version de Pester
 

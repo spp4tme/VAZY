@@ -6,13 +6,17 @@
 Invoke-Pester -Path .\tests
 ```
 
-104 tests, qui tournent **sans VMware installé** : la couche pilote est
+Toute la suite tourne **sans VMware installé** : la couche pilote est
 remplacée par un faux pilote en mémoire. Rien à installer — Pester 3.4.0 est
 livré avec Windows, et c'est la version qu'impose la CI.
 
 Le détail est dans [tests/README.md](tests/README.md) : comment le faux pilote
-est branché, ce que fournit le harnais, et les pièges de PowerShell 5.1
-rencontrés en écrivant ces tests.
+est branché, ce que fournit le harnais, et ce que ces tests ne peuvent pas voir.
+
+**Avant de chercher longtemps, lisez [docs/PIEGES.md](docs/PIEGES.md).** Chaque
+piège y est noté avec ce qui le révèle et ce qui le corrige : blocage sur les
+tuyaux hérités, angles de PowerShell 5.1, règles des clones liés, comportements
+de VMware, et façons d'écrire un test qui passe pour de mauvaises raisons.
 
 ## La règle des trois couches
 
@@ -86,3 +90,16 @@ quoi : le quoi se lit dans le diff.
 3. La règle des trois couches est respectée.
 4. Le README reste juste (l'enrichir plutôt que le refondre), et
    `CHANGELOG.md` mentionne le changement sous « Non publié ».
+5. Si le contrat du pilote change, l'en-tête de `lib/pilote-vmware.ps1` suit —
+   c'est la spécification, et deux tests refusent qu'elle soit incomplète.
+6. Si un piège vous a coûté du temps, il va dans [docs/PIEGES.md](docs/PIEGES.md).
+   C'est ce qui rend la deuxième fois plus courte que la première.
+
+## Ce que les tests ne prouveront jamais
+
+Ils remplacent la couche pilote : le comportement réel de l'hyperviseur, les
+processus et les handles du système, et l'intérieur des invités leur échappent.
+
+Le blocage qui figeait vazy au démarrage d'une VM est passé sous toute la suite
+au vert avant d'être trouvé au premier essai sur du vrai VMware. **Faites
+tourner votre changement pour de vrai avant de le déclarer fini.**

@@ -65,6 +65,42 @@ Describe 'Contrat du pilote' {
         }
     }
 
+    It 'est entierement decrit par l''en-tete du pilote de reference' {
+        # L'en-tete de pilote-vmware.ps1 EST la specification du contrat : c'est
+        # ce que lit quiconque veut ecrire un pilote. Une fonction ajoutee au
+        # contrat sans y figurer rend cette specification menteuse, et le
+        # prochain pilote sera incomplet sans que personne ne s'en apercoive.
+        # Ce test a ete ecrit apres avoir constate exactement cela : les trois
+        # fonctions de segments reseau manquaient a l'appel.
+        $lignes = Get-Content $script:PiloteReference -Encoding UTF8
+        $entete = New-Object System.Collections.Generic.List[string]
+        foreach ($l in $lignes) {
+            if ($l -match '^\s*#' -or $l.Trim() -eq '') { $entete.Add($l) } else { break }
+        }
+        $texte = ($entete.ToArray() -join "`n")
+
+        $oubliees = @($script:Contrat | Where-Object { $texte -notmatch [regex]::Escape($_) })
+        if ($oubliees.Count -gt 0) {
+            throw ("fonctions du contrat absentes de l'en-tete de pilote-vmware.ps1 : " + ($oubliees -join ', '))
+        }
+    }
+
+    It 'documente dans l''en-tete toutes les cles de la description du pilote' {
+        $lignes = Get-Content $script:PiloteReference -Encoding UTF8
+        $entete = New-Object System.Collections.Generic.List[string]
+        foreach ($l in $lignes) {
+            if ($l -match '^\s*#' -or $l.Trim() -eq '') { $entete.Add($l) } else { break }
+        }
+        $texte = ($entete.ToArray() -join "`n")
+
+        $oubliees = @(@('Nom', 'Executable', 'ExtensionMachine', 'SensibleHyperV',
+                        'ConseilInstantane', 'SchemaAffichageDistant') |
+                      Where-Object { $texte -notmatch ('\b' + [regex]::Escape($_) + '\b') })
+        if ($oubliees.Count -gt 0) {
+            throw ("cles de description absentes de l'en-tete : " + ($oubliees -join ', '))
+        }
+    }
+
     It 'ne laisse aucun terme propre a VMware dans les couches 1 et 2' {
         # La regle structurante du projet, verifiee mecaniquement. Les termes
         # peuvent apparaitre dans des chaines de message destinees a
