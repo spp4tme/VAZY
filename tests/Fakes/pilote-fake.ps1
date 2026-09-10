@@ -47,6 +47,46 @@ function Reset-PiloteFake {
     }
 }
 
+# ----------------------------------------------------------------------------
+#  Persistance entre deux processus
+#  Les tests unitaires chargent la logique dans leur propre processus : la
+#  mémoire suffit. Les tests d'intégration lancent vazy.cmd, donc un processus
+#  neuf par commande ; sans persistance, le faux pilote y oublierait les
+#  modèles déclarés et les machines créées. Activée par $env:VAZY_FAKE_ETAT.
+#  Export-Clixml plutôt que JSON : il rend les tables de hachage telles quelles.
+# ----------------------------------------------------------------------------
+
+function Save-EtatFake {
+    if (-not $env:VAZY_FAKE_ETAT) { return }
+    # L'observateur est un scriptblock : il ne se sérialise pas, et la logique
+    # le rebranche de toute façon à chaque démarrage.
+    $aGarder = @{
+        DossierTravail  = $global:VazyFake.DossierTravail
+        Machines        = $global:VazyFake.Machines
+        Modeles         = $global:VazyFake.Modeles
+        Systeme         = $global:VazyFake.Systeme
+        OutilsRepondent = $global:VazyFake.OutilsRepondent
+        CodeScript      = $global:VazyFake.CodeScript
+        Appels          = @($global:VazyFake.Appels)
+    }
+    try { $aGarder | Export-Clixml -LiteralPath $env:VAZY_FAKE_ETAT -Depth 8 } catch { }
+}
+
+function Restore-EtatFake {
+    if (-not $env:VAZY_FAKE_ETAT) { return }
+    if (-not (Test-Path -LiteralPath $env:VAZY_FAKE_ETAT -PathType Leaf)) { return }
+    try {
+        $lu = Import-Clixml -LiteralPath $env:VAZY_FAKE_ETAT
+        $global:VazyFake.DossierTravail  = $lu.DossierTravail
+        $global:VazyFake.Machines        = $lu.Machines
+        $global:VazyFake.Modeles         = $lu.Modeles
+        $global:VazyFake.Systeme         = $lu.Systeme
+        $global:VazyFake.OutilsRepondent = $lu.OutilsRepondent
+        $global:VazyFake.CodeScript      = $lu.CodeScript
+        foreach ($a in @($lu.Appels)) { $global:VazyFake.Appels.Add($a) }
+    } catch { }
+}
+
 # Journalise un appel puis déclenche l'échec programmé s'il y en a un.
 function Write-AppelFake {
     param([string]$Fonction, [hashtable]$Parametres = @{})
@@ -55,6 +95,7 @@ function Write-AppelFake {
         Parametres = $Parametres
         Rang       = $global:VazyFake.Appels.Count + 1
     })
+    Save-EtatFake
     if ($global:VazyFake.Echecs.ContainsKey($Fonction)) {
         $e = $global:VazyFake.Echecs[$Fonction]
         if ($e.Restant -gt 0) {
@@ -75,8 +116,11 @@ function New-ErreurFake {
 function Get-AppelsPilote {
     <# Les appels reçus, éventuellement filtrés sur un nom de fonction. #>
     param([string]$Fonction = '')
-    if ($Fonction) { return @($global:VazyFake.Appels | Where-Object { $_.Fonction -eq $Fonction }) }
-    return @($global:VazyFake.Appels)
+    # .ToArray() et non @() : en PowerShell 5.1, @() sur une List[object] vide
+    # lève « Les types des arguments ne correspondent pas ».
+    $tous = $global:VazyFake.Appels.ToArray()
+    if ($Fonction) { return @($tous | Where-Object { $_.Fonction -eq $Fonction }) }
+    return $tous
 }
 
 function Test-AppelPilote {
@@ -121,6 +165,7 @@ function Register-ModeleFake {
         Empreinte   = $Empreinte
         DisqueGo    = $DisqueGo
     }
+    Save-EtatFake
     return $Chemin
 }
 
@@ -224,6 +269,7 @@ function New-MachineDepuisModele {
         Vnc         = @{ Actif = $false; Port = 0; MotDePasse = '' }
         Complete    = $false
     }
+    Save-EtatFake
     return $chemin
 }
 
@@ -240,6 +286,7 @@ function Set-MachineParametres {
     if ($RamMo -gt 0) { $etat.RamMo = $RamMo }
     if ($Cpu -gt 0) { $etat.Cpu = $Cpu }
     foreach ($p in $Brut) { $etat.Brut[$p.Cle] = $p.Valeur }
+    Save-EtatFake
 }
 
 function Set-MachineReseau {
@@ -249,6 +296,7 @@ function Set-MachineReseau {
     )
     Write-AppelFake 'Set-MachineReseau' @{ Machine = $Machine; Modes = $Modes }
     if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].Modes = @($Modes) }
+    Save-EtatFake
 }
 
 function Start-Machine {
@@ -259,6 +307,7 @@ function Start-Machine {
     Write-AppelFake 'Start-Machine' @{ Machine = $Machine; SansInterface = [bool]$SansInterface }
     Assert-PasModeleFake -Machine $Machine -Operation 'démarrer'
     if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].EnMarche = $true }
+    Save-EtatFake
 }
 
 function Stop-Machine {
@@ -268,6 +317,7 @@ function Stop-Machine {
     )
     Write-AppelFake 'Stop-Machine' @{ Machine = $Machine; Brutal = [bool]$Brutal }
     if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].EnMarche = $false }
+    Save-EtatFake
 }
 
 function Remove-Machine {
@@ -281,6 +331,7 @@ function Remove-Machine {
     } elseif (Test-Path -LiteralPath $Machine) {
         Remove-Item -LiteralPath $Machine -Force -ErrorAction SilentlyContinue
     }
+    Save-EtatFake
     return $null
 }
 
@@ -299,6 +350,7 @@ function New-MachineInstantane {
         $etat = $global:VazyFake.Machines[$Machine]
         if ($etat.Instantanes -notcontains $Nom) { $etat.Instantanes = @($etat.Instantanes) + $Nom }
     }
+    Save-EtatFake
 }
 
 function Restore-MachineInstantane {
@@ -321,6 +373,7 @@ function Remove-MachineInstantane {
         $etat = $global:VazyFake.Machines[$Machine]
         $etat.Instantanes = @($etat.Instantanes | Where-Object { $_ -ne $Nom })
     }
+    Save-EtatFake
 }
 
 # ----------------------------------------------------------------------------
@@ -338,6 +391,7 @@ function Protect-MachineModele {
     Write-AppelFake 'Protect-MachineModele' @{ Machine = $Machine }
     if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].EstModele = $true }
     New-Item -ItemType File -Path ($Machine + '.vazy-modele') -Force | Out-Null
+    Save-EtatFake
 }
 
 function Unprotect-MachineModele {
@@ -345,6 +399,7 @@ function Unprotect-MachineModele {
     Write-AppelFake 'Unprotect-MachineModele' @{ Machine = $Machine }
     if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].EstModele = $false }
     if (Test-Path -LiteralPath ($Machine + '.vazy-modele')) { Remove-Item -LiteralPath ($Machine + '.vazy-modele') -Force }
+    Save-EtatFake
 }
 
 # ----------------------------------------------------------------------------
@@ -361,6 +416,7 @@ function Set-MachineVariableInvite {
     if (-not $global:VazyFake.Machines.ContainsKey($Machine)) { return }
     $vars = $global:VazyFake.Machines[$Machine].Variables
     if ($Valeur -eq '') { $vars.Remove($Nom) } else { $vars[$Nom] = $Valeur }
+    Save-EtatFake
 }
 
 function Get-MachineSystemeInvite {
@@ -404,6 +460,7 @@ function Set-MachineAffichageDistant {
     if ($global:VazyFake.Machines.ContainsKey($Machine)) {
         $global:VazyFake.Machines[$Machine].Vnc = @{ Actif = $Actif; Port = $Port; MotDePasse = $MotDePasse }
     }
+    Save-EtatFake
 }
 
 # ----------------------------------------------------------------------------
@@ -442,6 +499,7 @@ function Convert-MachineEnComplete {
         $etat.Complete    = $true
         $etat.Instantanes = @()    # un clone complet ne conserve pas les instantanés
     }
+    Save-EtatFake
     return $Machine
 }
 
@@ -452,5 +510,8 @@ function Get-MachineDisqueGo {
     return 0.0
 }
 
-# État initial, pour que le simple chargement du pilote suffise.
+# État initial, pour que le simple chargement du pilote suffise ; puis reprise
+# de l'état laissé par le processus précédent quand la persistance est demandée
+# (tests d'intégration : une commande vazy = un processus neuf).
 Reset-PiloteFake
+Restore-EtatFake

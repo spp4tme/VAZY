@@ -104,8 +104,11 @@ function Reset-EtatVazy {
 function Get-MessagesTest {
     <# Les messages émis depuis le dernier Reset-EtatVazy, filtrables par type. #>
     param([string]$Type = '')
-    if ($Type) { return @($script:MessagesTest | Where-Object { $_.Type -eq $Type }) }
-    return @($script:MessagesTest)
+    # .ToArray() et non @() : en PowerShell 5.1, @() sur une List[object] vide
+    # lève « Les types des arguments ne correspondent pas ».
+    $tous = $script:MessagesTest.ToArray()
+    if ($Type) { return @($tous | Where-Object { $_.Type -eq $Type }) }
+    return $tous
 }
 
 function Test-MessageTest {
