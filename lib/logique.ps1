@@ -14,6 +14,9 @@
 #    catalogue.json  modèles enregistrés et VM créées
 # ============================================================================
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 $script:NomOutil       = 'vazy'
 $script:VersionOutil   = '1.8.0'
 $script:VersionCatalogue = 8          # schéma de catalogue.json (voir Read-Catalogue)

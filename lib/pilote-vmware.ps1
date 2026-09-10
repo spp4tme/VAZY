@@ -82,6 +82,9 @@
 #  quoi faire pour corriger (voir New-ErreurPilote).
 # ============================================================================
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
 $script:VmrunExe    = $null                          # chemin de vmrun.exe, renseigné par Initialize-Pilote
 $script:Simulation  = $false                         # --dry-run : rien n'est modifié, les commandes sont affichées
 $script:Observateur = { param($Type, $Message) }     # journal et simulations, fourni par la logique

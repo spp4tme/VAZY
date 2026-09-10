@@ -43,6 +43,7 @@ Ce que vazy sait faire, en une phrase chacun : créer une VM en quelques seconde
 17. [Limites connues](#17-limites-connues)
 18. [Architecture](#18-architecture)
 19. [Historique des versions](#19-historique-des-versions)
+20. [Contribuer, tester, réutiliser](#20-contribuer-tester-réutiliser)
 
 ---
 
@@ -1165,14 +1166,22 @@ Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre
 
 ## 19. Historique des versions
 
-| Version | Apports |
-|---|---|
-| 1.0 | Création de VM par clone lié, options, `--set`, catalogue, modèles, configuration |
-| 1.1 | Remise à zéro et instantanés : `reset`, `snap`, `snaps`, `back`, `unsnap`, point de retour `vazy-neuf`, marque de protection des modèles |
-| 1.2 | VM éphémères `--tmp`, nettoyage paresseux, `gc` |
-| 1.3 | Labos : `lab up`, `lab status`, `lab down`, fichier JSON, dépendances et délai |
-| 1.4 | Personnalisation de l'invité par identifiants, `template creds`, `--hostname` |
-| 1.5 | Personnalisation sans identifiant par guestinfo, scripts à installer dans le modèle, `template mark` |
-| 1.6 | `doctor`, `--dry-run`, journal, empreinte du modèle, `freeze`, `lab export`, prérequis et `template alias` |
-| 1.7 | Écran distant `--vnc`, lien `vnc://`, `vazy vnc`, documentation SSH et Tailscale |
-| 1.8 | Labo en une ligne avec `--vm`, `--save`, assistant `lab new`, labos retrouvés par leur nom |
+L'historique détaillé, version par version, est dans
+**[CHANGELOG.md](CHANGELOG.md)**.
+
+En un coup d'œil : la 1.0 crée des VM par clone lié ; la 1.4 apporte les
+instantanés, les VM éphémères et les labos ; la 1.5 la personnalisation de
+l'invité sans identifiant ; la 1.6 le diagnostic, le mode simulation et la
+protection du modèle ; la 1.7 l'écran distant ; la 1.8 les labos décrits en
+une ligne.
+
+---
+
+## 20. Contribuer, tester, réutiliser
+
+- **Tests** : `Invoke-Pester -Path .\tests` — 66 tests qui tournent sans VMware
+  installé. Comment c'est possible : [tests/README.md](tests/README.md).
+- **Contribuer** : [CONTRIBUTING.md](CONTRIBUTING.md) — la règle des trois
+  couches, où va quoi, et ce qu'on vérifie avant de proposer un changement.
+- **Licence** : [MIT](LICENSE). Réutilisez, modifiez, redistribuez ; gardez la
+  mention de copyright.
