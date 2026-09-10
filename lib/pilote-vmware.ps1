@@ -39,6 +39,23 @@
 #    Get-MachineInstantanes   -Machine
 #                              -> noms des instantanés de la machine
 #
+#  Suspension (pool de VM chaudes) : une machine suspendue garde sa mémoire sur
+#  le disque et reprend en quelques secondes, sans redémarrer.
+#    Suspend-Machine           -Machine          fige la machine
+#    Resume-Machine            -Machine [-SansInterface]
+#                                                la reprend là où elle en était
+#    Test-MachineSuspendue     -Machine          -> $true si elle est figée
+#
+#  Lecture d'une variable posée par l'invité (poignée de main du pool : l'invité
+#  signale qu'il est prêt à être suspendu) :
+#    Get-MachineVariableInvite -Machine -Nom     -> valeur, ou '' si absente
+#
+#  Occupation disque réelle d'une machine, en Go :
+#    Get-MachineOccupationGo   -Machine
+#                              -> @{ Differentiel ; Suspension ; Autres ; Total }
+#                                 Differentiel = ce que le clone occupe VRAIMENT,
+#                                 sans les disques de base du modèle qu'il partage.
+#
 #  Instantanés (phase 1, remise à zéro) :
 #    New-MachineInstantane     -Machine -Nom     prendre un instantané
 #    Restore-MachineInstantane -Machine -Nom     revenir à un instantané (machine arrêtée)
@@ -942,6 +959,96 @@ function Remove-MachineInstantane {
     if ($r.Code -ne 0) {
         throw (New-ErreurPilote "La suppression de l'instantané « $Nom » a échoué : $(Get-MessageVmrun $r)" `
             "Vérifiez qu'il existe (vazy snaps <nom>) et qu'aucune opération n'est en cours dans VMware Workstation.")
+    }
+}
+
+# ============================================================================
+#  Suspension : le socle du pool de VM chaudes
+# ============================================================================
+#  « vmrun suspend » écrit la mémoire de la machine sur le disque et l'arrête
+#  net. « vmrun start » la reprend exactement où elle en était, sans
+#  redémarrage : quelques secondes au lieu d'un boot complet.
+#
+#  VMware laisse deux fichiers à côté du .vmx : le .vmss (état) et le .vmem
+#  (mémoire). Leur présence est ce qui distingue une machine suspendue d'une
+#  machine simplement éteinte.
+# ============================================================================
+
+function Suspend-Machine {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    Assert-MachinePasModele -Machine $Machine -Operation 'suspendre'
+    $r = Invoke-Vmrun @('suspend', $Machine)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La suspension de $Machine a échoué : $(Get-MessageVmrun $r)" `
+            ("Vérifiez que la machine est bien démarrée et que les outils invité répondent.`n" +
+             "Une machine qui n'a pas fini de démarrer refuse parfois de se suspendre : réessayez dans quelques secondes."))
+    }
+}
+
+function Resume-Machine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [switch]$SansInterface
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'reprendre'
+    # Reprendre, c'est démarrer : VMware retrouve l'état suspendu tout seul.
+    $mode = if ($SansInterface) { 'nogui' } else { 'gui' }
+    $r = Invoke-Vmrun @('start', $Machine, $mode)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La reprise de $Machine a échoué : $(Get-MessageVmrun $r)" `
+            ("L'état de suspension est peut-être corrompu ou périmé.`n" +
+             "Reprenez la machine à la main dans VMware Workstation pour voir le message complet."))
+    }
+}
+
+function Test-MachineSuspendue {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    if (-not (Test-Path -LiteralPath $Machine -PathType Leaf)) { return $false }
+    $dossier = Split-Path -Parent $Machine
+    $etat = @(Get-ChildItem -LiteralPath $dossier -Filter '*.vmss' -File -ErrorAction SilentlyContinue)
+    if ($etat.Count -eq 0) { return $false }
+    # Un .vmss subsiste parfois après une reprise : une machine en marche n'est
+    # pas suspendue, quoi qu'en dise le disque.
+    foreach ($c in @(Get-MachineEnCours)) { if ($c -ieq $Machine) { return $false } }
+    return $true
+}
+
+# Valeur d'une variable posée par l'invité lui-même (info-set côté invité).
+# Sert à la poignée de main du pool : l'invité annonce qu'il est prêt.
+# Chaîne vide si la variable n'existe pas ou si la machine ne répond pas.
+function Get-MachineVariableInvite {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    $r = Invoke-Vmrun @('readVariable', $Machine, 'guestVar', $Nom)
+    if ($r.Code -ne 0) { return '' }
+    $valeur = ($r.Lignes -join "`n").Trim()
+    if ($valeur -match '(?i)^no value found') { return '' }
+    return $valeur
+}
+
+# Occupation réelle sur le disque. Le clone lié partage les disques de base du
+# modèle : ce qui lui appartient vraiment, ce sont ses disques de différences.
+function Get-MachineOccupationGo {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $dossier = Split-Path -Parent $Machine
+    $differentiel = [long]0
+    $suspension   = [long]0
+    $autres       = [long]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $dossier -File -Recurse -ErrorAction SilentlyContinue)) {
+        switch -Regex ($f.Extension) {
+            '(?i)^\.vmdk$' { $differentiel += [long]$f.Length; continue }
+            '(?i)^\.(vmss|vmem)$' { $suspension += [long]$f.Length; continue }
+            default { $autres += [long]$f.Length }
+        }
+    }
+    $total = $differentiel + $suspension + $autres
+    return @{
+        Differentiel = [math]::Round($differentiel / 1GB, 2)
+        Suspension   = [math]::Round($suspension / 1GB, 2)
+        Autres       = [math]::Round($autres / 1GB, 2)
+        Total        = [math]::Round($total / 1GB, 2)
     }
 }
 

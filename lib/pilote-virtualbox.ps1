@@ -846,6 +846,85 @@ function Get-MachineDisqueGo {
 }
 
 # ============================================================================
+#  Suspension : le socle du pool de VM chaudes
+# ============================================================================
+#  VirtualBox appelle ça « savestate » : la mémoire part dans un .sav et la
+#  machine passe à l'état « saved ». Un startvm la reprend là où elle en était.
+# ============================================================================
+
+function Suspend-Machine {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    Assert-MachinePasModele -Machine $Machine -Operation 'suspendre'
+    $nom = Get-NomMachine -Machine $Machine
+    $r = Invoke-VBoxManage @('controlvm', $nom, 'savestate')
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La suspension de $Machine a échoué : $(Get-MessageVBox $r)" `
+            'Vérifiez que la machine est bien démarrée ; une VM qui n''a pas fini de démarrer refuse parfois de se suspendre.')
+    }
+}
+
+function Resume-Machine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [switch]$SansInterface
+    )
+    Assert-MachinePasModele -Machine $Machine -Operation 'reprendre'
+    $nom = Get-NomMachine -Machine $Machine
+    $type = if ($SansInterface) { 'headless' } else { 'gui' }
+    $r = Invoke-VBoxManage @('startvm', $nom, '--type', $type)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La reprise de $Machine a échoué : $(Get-MessageVBox $r)" `
+            'L''état sauvegardé est peut-être périmé. Reprenez la machine à la main dans VirtualBox pour voir le message complet.')
+    }
+}
+
+function Test-MachineSuspendue {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $nom = $null
+    try { $nom = Get-NomMachine -Machine $Machine } catch { return $false }
+    $r = Invoke-VBoxManage @('showvminfo', $nom, '--machinereadable') -Lecture
+    if ($r.Code -ne 0) { return $false }
+    return ([string](Get-ValeurMachineReadable -Resultat $r -Cle 'VMState') -ieq 'saved')
+}
+
+function Get-MachineVariableInvite {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    $nom = $null
+    try { $nom = Get-NomMachine -Machine $Machine } catch { return '' }
+    $r = Invoke-VBoxManage @('guestproperty', 'get', $nom, ('/vazy/' + $Nom)) -Lecture
+    if ($r.Code -ne 0) { return '' }
+    foreach ($l in $r.Lignes) {
+        if ($l -match '^\s*Value:\s*(.+?)\s*$') { return $Matches[1] }
+    }
+    return ''
+}
+
+function Get-MachineOccupationGo {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $dossier = Split-Path -Parent $Machine
+    $differentiel = [long]0
+    $suspension   = [long]0
+    $autres       = [long]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $dossier -File -Recurse -ErrorAction SilentlyContinue)) {
+        switch -Regex ($f.Extension) {
+            '(?i)^\.(vdi|vmdk|vhd|vhdx)$' { $differentiel += [long]$f.Length; continue }
+            '(?i)^\.sav$'                 { $suspension   += [long]$f.Length; continue }
+            default                       { $autres       += [long]$f.Length }
+        }
+    }
+    $total = $differentiel + $suspension + $autres
+    return @{
+        Differentiel = [math]::Round($differentiel / 1GB, 2)
+        Suspension   = [math]::Round($suspension / 1GB, 2)
+        Autres       = [math]::Round($autres / 1GB, 2)
+        Total        = [math]::Round($total / 1GB, 2)
+    }
+}
+
+# ============================================================================
 #  Segments réseau personnalisés
 # ============================================================================
 #  Chez VirtualBox ce sont les « réseaux internes » (intnet), et c'est

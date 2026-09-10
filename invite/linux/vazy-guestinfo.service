@@ -12,6 +12,11 @@ Conflicts=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/vazy-guestinfo
+# KillMode=process : en mode reserve chaude, le script laisse derriere lui une
+# attente en tache de fond, qui sera figee avec la machine puis reprise au
+# reveil pour appliquer la nouvelle identite. Avec le mode par defaut
+# (control-group), systemd la tuerait des la fin du script principal.
+KillMode=process
 
 [Install]
 WantedBy=sysinit.target

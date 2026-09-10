@@ -43,6 +43,7 @@ function Reset-PiloteFake {
         Echecs          = @{}      # nom de fonction -> @{ Message ; Conseil ; Restant }
         Systeme         = 'linux'  # ce que renvoie Get-MachineSystemeInvite
         OutilsRepondent = $true    # ce que renvoie Wait-MachineOutils
+        InvitePoolRepond = $true   # l'invité honore-t-il la poignée de main du pool ?
         CodeScript      = 0        # ce que renvoie Invoke-MachineScript
         Observateur     = { param($Type, $Message) }
         Simulation      = $false
@@ -279,8 +280,11 @@ function New-MachineDepuisModele {
         Brut        = @{}
         Instantanes = @()
         EnMarche    = $false
+        Suspendue   = $false      # pool : mémoire figée sur le disque
         EstModele   = $false
-        Variables   = @{}
+        Variables   = @{}         # ce que vazy a déposé pour l'invité
+        VariablesInvite = @{}     # ce que l'invité a répondu à vazy
+        OccupationGo = 0.5        # place prise sur le disque, hors suspension
         Vnc         = @{ Actif = $false; Port = 0; MotDePasse = '' }
         Complete    = $false
     }
@@ -321,7 +325,18 @@ function Start-Machine {
     )
     Write-AppelFake 'Start-Machine' @{ Machine = $Machine; SansInterface = [bool]$SansInterface }
     Assert-PasModeleFake -Machine $Machine -Operation 'démarrer'
-    if ($global:VazyFake.Machines.ContainsKey($Machine)) { $global:VazyFake.Machines[$Machine].EnMarche = $true }
+    if ($global:VazyFake.Machines.ContainsKey($Machine)) {
+        $etat = $global:VazyFake.Machines[$Machine]
+        $etat.EnMarche = $true
+        # Un invité coopératif : s'il reçoit « mode: pool », il fait son travail
+        # puis s'annonce prêt à être figé. $global:VazyFake.InvitePoolRepond
+        # permet de jouer l'inverse — un modèle dont le script est trop ancien.
+        if ($global:VazyFake.InvitePoolRepond -and $etat.Variables.ContainsKey('vazy_config')) {
+            $json = ''
+            try { $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$etat.Variables['vazy_config'])) } catch { }
+            if ($json -match '"mode"\s*:\s*"pool"') { $etat.VariablesInvite['vazy_pool_pret'] = '1' }
+        }
+    }
     Save-EtatFake
 }
 
@@ -524,6 +539,87 @@ function Get-MachineDisqueGo {
     Write-AppelFake 'Get-MachineDisqueGo' @{ Machine = $Machine }
     if ($global:VazyFake.Modeles.ContainsKey($Machine)) { return [double]$global:VazyFake.Modeles[$Machine].DisqueGo }
     return 0.0
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat : suspension (pool de VM chaudes)
+# ----------------------------------------------------------------------------
+
+function Suspend-Machine {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    Write-AppelFake 'Suspend-Machine' @{ Machine = $Machine }
+    Assert-PasModeleFake -Machine $Machine -Operation 'suspendre'
+    if ($global:VazyFake.Machines.ContainsKey($Machine)) {
+        $etat = $global:VazyFake.Machines[$Machine]
+        $etat.EnMarche  = $false
+        $etat.Suspendue = $true
+    }
+    Save-EtatFake
+}
+
+function Resume-Machine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [switch]$SansInterface
+    )
+    Write-AppelFake 'Resume-Machine' @{ Machine = $Machine; SansInterface = [bool]$SansInterface }
+    Assert-PasModeleFake -Machine $Machine -Operation 'reprendre'
+    if ($global:VazyFake.Machines.ContainsKey($Machine)) {
+        $etat = $global:VazyFake.Machines[$Machine]
+        $etat.EnMarche  = $true
+        $etat.Suspendue = $false
+    }
+    Save-EtatFake
+}
+
+function Test-MachineSuspendue {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    if (-not $global:VazyFake.Machines.ContainsKey($Machine)) { return $false }
+    return [bool]$global:VazyFake.Machines[$Machine].Suspendue
+}
+
+function Get-MachineVariableInvite {
+    param(
+        [Parameter(Mandatory = $true)][string]$Machine,
+        [Parameter(Mandatory = $true)][string]$Nom
+    )
+    Write-AppelFake 'Get-MachineVariableInvite' @{ Machine = $Machine; Nom = $Nom }
+    if (-not $global:VazyFake.Machines.ContainsKey($Machine)) { return '' }
+    $vars = $global:VazyFake.Machines[$Machine].VariablesInvite
+    if ($vars.ContainsKey($Nom)) { return [string]$vars[$Nom] }
+    return ''
+}
+
+function Get-MachineOccupationGo {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    Write-AppelFake 'Get-MachineOccupationGo' @{ Machine = $Machine }
+    if (-not $global:VazyFake.Machines.ContainsKey($Machine)) {
+        return @{ Differentiel = 0.0; Suspension = 0.0; Autres = 0.0; Total = 0.0 }
+    }
+    $etat = $global:VazyFake.Machines[$Machine]
+    $suspension = if ($etat.Suspendue) { [math]::Round($etat.RamMo / 1024.0, 2) } else { 0.0 }
+    return @{
+        Differentiel = [double]$etat.OccupationGo
+        Suspension   = $suspension
+        Autres       = 0.0
+        Total        = [math]::Round([double]$etat.OccupationGo + $suspension, 2)
+    }
+}
+
+# Réservé aux tests : ce que l'invité a « répondu » à vazy.
+function Set-VariableInviteFake {
+    param([Parameter(Mandatory = $true)][string]$Chemin, [Parameter(Mandatory = $true)][string]$Nom, [string]$Valeur = '1')
+    if ($global:VazyFake.Machines.ContainsKey($Chemin)) {
+        $global:VazyFake.Machines[$Chemin].VariablesInvite[$Nom] = $Valeur
+    }
+}
+
+# Réservé aux tests : la place que prend une machine sur le disque.
+function Set-OccupationFake {
+    param([Parameter(Mandatory = $true)][string]$Chemin, [double]$Go = 1.0)
+    if ($global:VazyFake.Machines.ContainsKey($Chemin)) {
+        $global:VazyFake.Machines[$Chemin].OccupationGo = $Go
+    }
 }
 
 # ----------------------------------------------------------------------------

@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:NomOutil       = 'vazy'
 $script:VersionOutil   = '1.9.0'
-$script:VersionCatalogue = 9          # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionCatalogue = 10         # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -37,7 +37,8 @@ $script:RappelHyperVFait = $false   # le rappel court Hyper-V a-t-il déjà ét�
 $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins courts (chargée à la demande)
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
-                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net')
+                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net',
+                           'pool', 'pop')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -186,6 +187,8 @@ function Get-ConfigParDefaut {
     $c['dossierVms']        = ''         # dossier où créer les VM (vide = à côté du modèle)
     $c['espaceDisqueMinGo'] = 1          # marge d'espace libre exigée, en plus de la RAM de la VM
     $c['delaiOutilsSec']    = 120        # attente maximale des outils invité avant de personnaliser (phase 4)
+    $c['delaiPoolSec']      = 180        # attente maximale que l'invité s'annonce prêt à être figé (pool)
+    $c['poolReposSec']      = 20         # repli : temps laissé à l'invité avant de le figer, faute de poignée de main
     $c['vncPortMin']        = 5901       # plage de ports réservée à l'affichage distant des VM
     $c['vncPortMax']        = 5999
     $c['dossierLabos']      = ''         # où sont rangés les fichiers de labo (vide = <données>\labos)
@@ -254,6 +257,10 @@ function Save-Config {
 #                 { identifiant rendu par le pilote, adresse, dhcp, creeLe }.
 #                 Une carte branchée sur un segment apparaît dans
 #                 vms.<nom>.reseau sous la forme « nomme:<identifiant> ».
+#   version 10 : + vms.<nom>.pool (alias du modèle dont cette VM est une
+#                 réserve chaude, '' pour une VM ordinaire). Une VM de pool
+#                 n'apparaît pas dans « vazy list » et n'est jamais ramassée
+#                 par le nettoyage des éphémères.
 #   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
 #   migration destructive.
 function Read-Catalogue {
@@ -282,6 +289,10 @@ function Read-Catalogue {
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('labo')) {
             $vm['labo'] = ''             # VM d'avant la phase 3 : créée à la main
+            $modifie = $true
+        }
+        if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('pool')) {
+            $vm['pool'] = ''             # VM d'avant la v10 : jamais en réserve
             $modifie = $true
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('nomHote')) {
@@ -570,6 +581,7 @@ function Get-VmDuCatalogue {
             InstantaneNeuf = [string]$vm['instantaneNeuf']
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo = [string]$vm['labo']
+            Pool = [string]$vm['pool']          # alias du modèle si la VM est en réserve, sinon ''
             NomHote = [string]$vm['nomHote']
             Empreinte = $vm['empreinte']
             Sets = @($vm['sets'])
@@ -604,6 +616,7 @@ function New-VmDepuisModele {
         [switch]$SansDemarrage,
         [switch]$Ephemere,              # --tmp : VM jetable, supprimée dès qu'elle est trouvée éteinte
         [string]$Labo = '',             # nom du labo propriétaire (vazy lab up), vide sinon
+        [string]$Pool = '',             # alias du modèle si la VM part en réserve chaude, vide sinon
         [string]$NomHote = '',          # nom d'hôte à appliquer dans l'invité après démarrage (phase 4), vide = rien
         [switch]$Vnc                    # --vnc : écran de la VM accessible à distance
     )
@@ -737,6 +750,7 @@ function New-VmDepuisModele {
     $fiche['instantaneNeuf'] = $instantaneNeuf
     $fiche['ephemere'] = $false      # posé à $true seulement une fois la VM démarrée (voir ci-dessous)
     $fiche['labo']     = $Labo
+    $fiche['pool']     = $Pool
     $fiche['nomHote']  = $NomHote    # appliqué à chaque démarrage par vazy (voir Start-VmAvecPersonnalisation)
     # Empreinte des disques de base du modèle : un clone lié y lit en
     # permanence. Vérifiée avant chaque démarrage (voir Test-ModeleIntact).
@@ -799,11 +813,15 @@ function New-VmDepuisModele {
 # Toutes les VM du catalogue avec leur état : en marche, arrêtée, ou absente
 # (fichiers supprimés en dehors de vazy).
 function Get-ListeVms {
+    # Les VM en réserve (pool) sont écartées par défaut : elles sont un stock,
+    # pas des machines de travail, et noieraient la liste utile.
+    param([switch]$AvecPool)
     Connect-Pilote | Out-Null
     $enCours = @(Get-MachineEnCours)
     $liste = @()
     foreach ($nom in @($script:Catalogue['vms'].Keys)) {
         $vm = $script:Catalogue['vms'][$nom]
+        if (-not $AvecPool -and [string]$vm['pool']) { continue }
         $etat = 'arrêtée'
         if (-not (Test-Path -LiteralPath $vm['chemin'] -PathType Leaf)) {
             $etat = 'absente'
@@ -821,6 +839,7 @@ function Get-ListeVms {
             Chemin   = $vm['chemin']
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo     = [string]$vm['labo']
+            Pool     = [string]$vm['pool']
             VncPort  = [int]$(if ($vm['vnc'] -and $vm['vnc']['actif'] -eq $true) { $vm['vnc']['port'] } else { 0 })
         }
     }
@@ -902,6 +921,9 @@ function Invoke-Nettoyage {
     param([scriptblock]$Confirmer = $null, [switch]$Forcer, [switch]$Verbeux)
     $ephemeres = @()
     foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        # Une VM de réserve est un stock, jamais un déchet : elle est écartée
+        # explicitement, même si son drapeau « ephemere » est déjà à faux.
+        if ([string]$script:Catalogue['vms'][$nom]['pool']) { continue }
         if ($script:Catalogue['vms'][$nom]['ephemere'] -eq $true) { $ephemeres += $nom }
     }
     if ($ephemeres.Count -eq 0) {
@@ -2069,8 +2091,13 @@ function Set-MarqueModele {
 # (seule appliquée aujourd'hui), puis ip, masque, passerelle, dns, cle_ssh.
 # Le script invité ignore toute clé qu'il ne connaît pas.
 function Get-ChargeUtileInvite {
-    param([string]$NomHote)
-    $config = [ordered]@{ hostname = $NomHote }
+    param(
+        [string]$NomHote,
+        [string]$Mode = ''      # 'pool' : l'invité s'arrête avant de fixer son identité
+    )
+    $config = [ordered]@{}
+    if ($Mode) { $config['mode'] = $Mode }
+    $config['hostname'] = $NomHote
     $json = ConvertTo-Json -InputObject $config -Compress
     return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 }
@@ -2512,6 +2539,343 @@ function Set-AliasModele {
 # ----------------------------------------------------------------------------
 #  Configuration
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+#  Pool de VM chaudes
+#
+#  Créer une VM prend une trentaine de secondes, dont l'essentiel est le
+#  démarrage du système. L'idée : payer ce démarrage à l'avance. Des clones sont
+#  créés, démarrés, puis SUSPENDUS — leur mémoire part sur le disque. Les
+#  reprendre ne redémarre rien : deux à trois secondes.
+#
+#  Le vrai problème n'est pas la suspension, c'est l'IDENTITÉ. Une machine
+#  suspendue fige tout : nom d'hôte, bail DHCP, clés SSH, identifiant machine.
+#  Réveiller deux VM du même pool donnerait deux jumelles sur le réseau. Et
+#  comme il n'y a pas de redémarrage, le service guestinfo de l'invité, qui
+#  s'exécute au boot, ne se relance pas tout seul.
+#
+#  D'où la poignée de main : au moment de garnir le pool, vazy dépose
+#  « mode: pool » dans la configuration de l'invité. Le script du modèle
+#  reconnaît ce mode, fait le strict nécessaire (régénération des clés SSH et de
+#  l'identifiant machine, qui ne dépendent pas de l'identité demandée), puis
+#  ANNONCE qu'il est prêt en posant une variable, et attend. vazy voit cette
+#  variable, suspend. Au « pop », vazy dépose la vraie identité et reprend :
+#  l'invité, qui attendait, la lit et l'applique — sans redémarrage.
+#
+#  Si le modèle porte un script d'ancienne génération qui ne connaît pas ce
+#  mode, la variable n'arrive jamais : vazy retombe alors sur l'attente des
+#  outils invité plus un délai de repos, et prévient que l'identité au réveil
+#  sera celle du modèle. La réserve reste utilisable, elle est simplement moins
+#  bien tenue.
+# ----------------------------------------------------------------------------
+
+$script:VariablePoolPret = 'vazy_pool_pret'   # posée par l'invité quand il est prêt à être figé
+
+# Premier nom libre de la forme <modele>-pool-1, -2...
+function Get-NomVmPool {
+    param([Parameter(Mandatory = $true)][string]$Modele, [string]$DossierRacine)
+    $i = 1
+    do {
+        $candidat = '{0}-pool-{1}' -f $Modele, $i
+        $i++
+    } while ((Test-NomPris $candidat) -or ($DossierRacine -and (Test-Path -LiteralPath (Join-Path $DossierRacine $candidat))))
+    return $candidat
+}
+
+# Une VM de réserve est périmée si le modèle dont elle sort a changé : elle
+# démarrerait sur des disques qui ne sont plus les siens.
+function Test-VmPoolPerimee {
+    param([Parameter(Mandatory = $true)]$Vm)
+    if (-not $script:Catalogue['modeles'].Contains($Vm.Modele)) { return $true }
+    $chemin = [string]$script:Catalogue['modeles'][$Vm.Modele]['chemin']
+    if (-not (Test-Path -LiteralPath $chemin -PathType Leaf)) { return $true }
+    $empreinte = $Vm.Empreinte
+    if ($null -eq $empreinte -or @($empreinte.Keys).Count -eq 0) { return $false }   # rien à comparer
+    return (@((Test-MachineEmpreinte -Machine $chemin -Empreinte $empreinte).Erreurs).Count -gt 0)
+}
+
+# Les VM en réserve, toutes ou pour un modèle donné.
+function Get-VmsDuPool {
+    param([string]$Modele = '')
+    $liste = @()
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        $pool = [string]$script:Catalogue['vms'][$nom]['pool']
+        if (-not $pool) { continue }
+        if ($Modele -and $pool -ine $Modele) { continue }
+        $liste += (Get-VmDuCatalogue -Nom $nom)
+    }
+    return $liste
+}
+
+# Attend que l'invité annonce qu'il peut être figé.
+# Renvoie 'signal' (poignée de main réussie), 'outils' (repli : les outils
+# invité répondent, on laisse reposer) ou 'delai' (rien n'a répondu).
+function Wait-InvitePretPourSuspension {
+    param([Parameter(Mandatory = $true)]$Vm, [int]$DelaiMaxSec = 180)
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    $outilsVus = $false
+    while ($chrono.Elapsed.TotalSeconds -lt $DelaiMaxSec) {
+        $valeur = ''
+        try { $valeur = [string](Get-MachineVariableInvite -Machine $Vm.Chemin -Nom $script:VariablePoolPret) } catch { }
+        if ($valeur -and $valeur -ne '0') { return 'signal' }
+        if (-not $outilsVus) {
+            try { $outilsVus = [bool](Wait-MachineOutils -Machine $Vm.Chemin -DelaiMaxSec 5) } catch { }
+        }
+        if ($script:Simulation) { return 'signal' }
+        Start-Sleep -Seconds 3
+    }
+    if ($outilsVus) { return 'outils' }
+    return 'delai'
+}
+
+# Garnit la réserve d'un modèle jusqu'à la taille voulue. Chaque VM est créée,
+# démarrée, attendue, puis suspendue. Renvoie le nombre de VM ajoutées.
+function Add-VmsAuPool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Modele,
+        [Parameter(Mandatory = $true)][int]$Nombre,
+        [double]$RamGo = 2,
+        [int]$Cpu = 2,
+        [string[]]$Modes = @('nat'),
+        [object[]]$Brut = @()
+    )
+    if ($Nombre -le 0) { return 0 }
+    Connect-Pilote | Out-Null
+    $alias = Resolve-AliasModele -Alias $Modele
+    $infosModele = Get-ModeleDuCatalogue -Alias $alias
+    $methode = Get-MethodePersonnalisation -Alias $alias
+
+    if ($methode -ne 'guestinfo') {
+        Publish-Message 'attention' ("le modèle « {0} » n'est pas marqué guestinfo : les VM de la réserve garderont l'identité du modèle au réveil (même nom d'hôte, même bail DHCP). Pour une réserve pleinement utilisable : installez le script d'invité puis vazy template mark {0} --guestinfo" -f $alias)
+    }
+
+    # Une VM suspendue garde sa mémoire sur le disque : le coût est la RAM
+    # multipliée par la taille de la réserve, en plus des disques.
+    $dossierRacine = Get-DossierVms -Modele $infosModele
+    Test-EspaceDisque -Dossier $dossierRacine -RamGo ($RamGo * $Nombre) -Libelle ("les {0} VM de la réserve" -f $Nombre) | Out-Null
+
+    $ajoutees = 0
+    for ($i = 1; $i -le $Nombre; $i++) {
+        $nomVm = Get-NomVmPool -Modele $alias -DossierRacine $dossierRacine
+        Publish-Message 'etape' ("Réserve {0}/{1} : {2}" -f $i, $Nombre, $nomVm)
+        $vm = $null
+        try {
+            $vm = New-VmDepuisModele -Modele $alias -Nom $nomVm -RamGo $RamGo -Cpu $Cpu -Modes $Modes `
+                                     -Brut $Brut -SansDemarrage -Pool $alias
+        } catch {
+            Publish-Message 'attention' ("« {0} » n'a pas pu être créée ({1}). Réserve garnie de {2} VM." -f $nomVm, $_.Exception.Message, $ajoutees)
+            break
+        }
+        try {
+            if ($methode -eq 'guestinfo') {
+                Set-MachineVariableInvite -Machine $vm.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote '' -Mode 'pool')
+            }
+            Publish-Message 'info' 'démarrage, puis attente que l''invité soit prêt à être figé...'
+            Start-Machine -Machine $vm.Chemin -SansInterface
+            $issue = Wait-InvitePretPourSuspension -Vm (Get-VmDuCatalogue -Nom $nomVm) -DelaiMaxSec ([int]$script:Config['delaiPoolSec'])
+            switch ($issue) {
+                'signal' { Publish-Message 'ok' 'l''invité s''est annoncé prêt' }
+                'outils' {
+                    $repos = [int]$script:Config['poolReposSec']
+                    Publish-Message 'attention' ("l'invité n'a pas répondu à la poignée de main (script d'ancienne génération ?) : on laisse reposer {0} s avant de figer. L'identité au réveil sera celle du modèle." -f $repos)
+                    if (-not $script:Simulation) { Start-Sleep -Seconds $repos }
+                }
+                default {
+                    Publish-Message 'attention' 'ni poignée de main ni outils invité : la VM est figée telle quelle, elle sera peut-être inutilisable au réveil.'
+                }
+            }
+            Suspend-Machine -Machine $vm.Chemin
+            Publish-Message 'ok' ("« {0} » figée et mise en réserve" -f $nomVm)
+            $ajoutees++
+        } catch {
+            Publish-Message 'attention' ("« {0} » n'a pas pu être mise en réserve ({1}) : elle est supprimée." -f $nomVm, $_.Exception.Message)
+            try { Remove-VmDuPool -Nom $nomVm } catch { }
+            break
+        }
+    }
+    return $ajoutees
+}
+
+# Supprime une VM de réserve, fichiers compris. Refuse tout ce qui n'est pas
+# une VM de réserve : même garde-fou que pour les éphémères.
+function Remove-VmDuPool {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    $vm = Get-VmDuCatalogue -Nom $Nom
+    if (-not $vm.Pool) {
+        throw (New-ErreurOutil "Refus : « $($vm.Nom) » n'est pas une VM de réserve." "Pour la supprimer volontairement : vazy rm $($vm.Nom)")
+    }
+    if (Test-Path -LiteralPath $vm.Chemin -PathType Leaf) {
+        $reste = Remove-Machine -Machine $vm.Chemin
+        if ($reste -and $reste.Type -eq 'attention') { Publish-Message 'attention' $reste.Message }
+    }
+    $script:Catalogue['vms'].Remove($vm.Nom)
+    Save-Catalogue
+}
+
+function New-Pool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Modele,
+        [Parameter(Mandatory = $true)][int]$Taille,
+        [double]$RamGo = 2,
+        [int]$Cpu = 2,
+        [string[]]$Modes = @('nat'),
+        [object[]]$Brut = @()
+    )
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    $alias = Resolve-AliasModele -Alias $Modele
+    $existantes = @(Get-VmsDuPool -Modele $alias)
+    if ($existantes.Count -gt 0) {
+        throw (New-ErreurOutil "Une réserve existe déjà pour « $alias » ($($existantes.Count) VM)." `
+            "Pour la compléter : vazy pool refill $alias --size <n>. Pour repartir de zéro : vazy pool destroy $alias puis vazy pool create $alias --size $Taille")
+    }
+    $ajoutees = Add-VmsAuPool -Modele $alias -Nombre $Taille -RamGo $RamGo -Cpu $Cpu -Modes $Modes -Brut $Brut
+    Publish-Message 'ok' ("Réserve « {0} » : {1} VM prêtes en {2}" -f $alias, $ajoutees, (Format-Duree $chrono.Elapsed.TotalSeconds))
+    return [pscustomobject]@{ Modele = $alias; Creees = $ajoutees; Duree = $chrono.Elapsed.TotalSeconds }
+}
+
+function Invoke-PoolRefill {
+    param([Parameter(Mandatory = $true)][string]$Modele, [int]$Taille = 0)
+    $alias = Resolve-AliasModele -Alias $Modele
+    $existantes = @(Get-VmsDuPool -Modele $alias)
+    $utilisables = @($existantes | Where-Object { -not (Test-VmPoolPerimee -Vm $_) })
+    if ($Taille -le 0) { $Taille = $existantes.Count }
+    if ($Taille -le 0) {
+        throw (New-ErreurOutil "Aucune réserve pour « $alias », et aucune taille demandée." "Indiquez-la : vazy pool refill $alias --size 3, ou créez la réserve : vazy pool create $alias --size 3")
+    }
+    $manquantes = $Taille - $utilisables.Count
+    if ($manquantes -le 0) {
+        Publish-Message 'ok' ("Réserve « {0} » déjà complète : {1} VM utilisables sur {2} demandées." -f $alias, $utilisables.Count, $Taille)
+        return [pscustomobject]@{ Modele = $alias; Creees = 0 }
+    }
+    # Le gabarit est repris d'une VM existante, pour que la réserve reste homogène.
+    $ramGo = 2; $cpu = 2; $modes = @('nat')
+    if ($existantes.Count -gt 0) {
+        $ramGo = [double]$existantes[0].RamGo; $cpu = [int]$existantes[0].Cpu; $modes = @($existantes[0].Reseau)
+    }
+    $ajoutees = Add-VmsAuPool -Modele $alias -Nombre $manquantes -RamGo $ramGo -Cpu $cpu -Modes $modes
+    Publish-Message 'ok' ("Réserve « {0} » complétée : {1} VM ajoutées." -f $alias, $ajoutees)
+    return [pscustomobject]@{ Modele = $alias; Creees = $ajoutees }
+}
+
+function Get-StatutPool {
+    param([string]$Modele = '')
+    Connect-Pilote | Out-Null
+    $alias = if ($Modele) { Resolve-AliasModele -Alias $Modele } else { '' }
+    $liste = @()
+    foreach ($vm in @(Get-VmsDuPool -Modele $alias)) {
+        $presente = Test-Path -LiteralPath $vm.Chemin -PathType Leaf
+        $perimee = if ($presente) { Test-VmPoolPerimee -Vm $vm } else { $true }
+        $suspendue = $false
+        $occupation = @{ Total = 0.0; Suspension = 0.0 }
+        if ($presente) {
+            try { $suspendue = [bool](Test-MachineSuspendue -Machine $vm.Chemin) } catch { }
+            try { $occupation = Get-MachineOccupationGo -Machine $vm.Chemin } catch { }
+        }
+        $etat = if (-not $presente) { 'absente' } elseif ($perimee) { 'périmée' } elseif ($suspendue) { 'prête' } else { 'non figée' }
+        $liste += [pscustomobject]@{
+            Nom          = $vm.Nom
+            Modele       = $vm.Pool
+            Etat         = $etat
+            RamGo        = $vm.RamGo
+            Cpu          = $vm.Cpu
+            Reseau       = (@($vm.Reseau) -join ',')
+            SuspensionGo = [double]$occupation.Suspension
+            TotalGo      = [double]$occupation.Total
+            CreeeLe      = $vm.CreeeLe
+        }
+    }
+    return $liste
+}
+
+# Sort une VM de la réserve et lui donne sa vraie identité.
+function Invoke-Pop {
+    param(
+        [Parameter(Mandatory = $true)][string]$Modele,
+        [string]$Nom = '',
+        [string]$NomHote = '',
+        [switch]$SansInterface
+    )
+    $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+    Connect-Pilote | Out-Null
+    $alias = Resolve-AliasModele -Alias $Modele
+    $candidates = @(Get-VmsDuPool -Modele $alias)
+    if ($candidates.Count -eq 0) {
+        throw (New-ErreurOutil "Aucune réserve pour le modèle « $alias »." `
+            ("Garnissez-la : vazy pool create $alias --size 3`n" +
+             "Ou créez une VM comme d'habitude : vazy $alias"))
+    }
+    $utilisables = @()
+    $perimees = 0
+    foreach ($c in $candidates) {
+        if (-not (Test-Path -LiteralPath $c.Chemin -PathType Leaf)) { continue }
+        if (Test-VmPoolPerimee -Vm $c) { $perimees++; continue }
+        $utilisables += $c
+    }
+    if ($utilisables.Count -eq 0) {
+        $cause = if ($perimees -gt 0) {
+            "Les $perimees VM de la réserve sont périmées : le modèle « $alias » a changé depuis leur création, elles démarreraient sur des disques qui ne sont plus les leurs."
+        } else {
+            "La réserve de « $alias » est vide."
+        }
+        throw (New-ErreurOutil $cause `
+            ("Reconstituez-la : vazy pool destroy $alias puis vazy pool create $alias --size <n>`n" +
+             "Ou créez une VM comme d'habitude : vazy $alias"))
+    }
+
+    $choisie = $utilisables[0]
+    if ($Nom) {
+        Test-NomValide -Nom $Nom
+        if (Test-NomPris $Nom) {
+            throw (New-ErreurOutil "Le nom « $Nom » est déjà utilisé." "Choisissez-en un autre (--name), ou supprimez l'ancienne VM : vazy rm $Nom")
+        }
+    } else {
+        $Nom = Get-NomLibre -Modele $alias -DossierRacine (Split-Path -Parent $choisie.Dossier)
+    }
+
+    # Sortie du catalogue AVANT la reprise : une seconde commande ne doit jamais
+    # servir la même VM, même si la reprise échoue ensuite.
+    $fiche = $script:Catalogue['vms'][$choisie.Nom]
+    $fiche['pool']    = ''
+    $fiche['nomHote'] = $NomHote
+    $script:Catalogue['vms'].Remove($choisie.Nom)
+    $script:Catalogue['vms'][$Nom] = $fiche
+    Save-Catalogue
+
+    Publish-Message 'ok' ("« {0} » sortie de la réserve, devient « {1} »" -f $choisie.Nom, $Nom)
+
+    # Nouvelle identité déposée avant la reprise : l'invité, qui attend, la lira.
+    if ((Get-MethodePersonnalisation -Alias $alias) -eq 'guestinfo') {
+        try { Set-MachineVariableInvite -Machine $choisie.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote $NomHote) }
+        catch { Publish-Message 'attention' ("configuration non déposée ({0}) : la VM gardera l'identité du modèle." -f $_.Exception.Message) }
+    } elseif ($NomHote) {
+        Publish-Message 'attention' ("le modèle « {0} » n'est pas marqué guestinfo : le nom d'hôte « {1} » ne sera pas appliqué au réveil (une VM reprise ne redémarre pas)." -f $alias, $NomHote)
+    }
+
+    Resume-Machine -Machine $choisie.Chemin -SansInterface:$SansInterface
+    Publish-Message 'ok' ("VM « {0} » réveillée en {1}" -f $Nom, (Format-Duree $chrono.Elapsed.TotalSeconds))
+
+    return [pscustomobject]@{
+        Nom = $Nom; Ancien = $choisie.Nom; Chemin = $choisie.Chemin
+        Restantes = ($utilisables.Count - 1); Duree = $chrono.Elapsed.TotalSeconds
+    }
+}
+
+function Remove-Pool {
+    param([Parameter(Mandatory = $true)][string]$Modele)
+    Connect-Pilote | Out-Null
+    $alias = Resolve-AliasModele -Alias $Modele
+    $vms = @(Get-VmsDuPool -Modele $alias)
+    if ($vms.Count -eq 0) {
+        throw (New-ErreurOutil "Aucune réserve pour « $alias »." 'Voir les réserves existantes : vazy pool status')
+    }
+    $supprimees = 0
+    foreach ($vm in $vms) {
+        try { Remove-VmDuPool -Nom $vm.Nom; $supprimees++ }
+        catch { Publish-Message 'attention' ("« {0} » n'a pas pu être supprimée ({1})." -f $vm.Nom, $_.Exception.Message) }
+    }
+    Publish-Message 'ok' ("Réserve « {0} » détruite : {1} VM supprimées." -f $alias, $supprimees)
+    return [pscustomobject]@{ Modele = $alias; Supprimees = $supprimees }
+}
 
 # ----------------------------------------------------------------------------
 #  Segments réseau personnalisés

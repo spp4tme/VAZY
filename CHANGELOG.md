@@ -5,7 +5,22 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ## [Non publié]
 
-Rien pour l'instant.
+### Ajouté
+
+- **Réserve de VM chaudes** : `vazy pool create|status|refill|destroy` et
+  `vazy pop`. Des clones sont créés, démarrés puis **suspendus** à l'avance ;
+  les réveiller prend deux à trois secondes au lieu d'une trentaine.
+  Le point délicat est l'identité au réveil — une machine suspendue fige nom
+  d'hôte, bail DHCP et clés SSH, et ne redémarre pas. Résolu par une poignée de
+  main : l'invité s'annonce prêt à être figé, attend en tâche de fond, et
+  applique la vraie identité au réveil. Voir README, section 5.6.
+- Cinq fonctions au contrat du pilote : `Suspend-Machine`, `Resume-Machine`,
+  `Test-MachineSuspendue`, `Get-MachineVariableInvite` (lecture d'une variable
+  posée par l'invité) et `Get-MachineOccupationGo` (place réellement occupée).
+- Le script d'invité Linux gère le mode réserve, et renouvelle le bail DHCP au
+  réveil. Un modèle dont le script est plus ancien reste utilisable : vazy
+  prévient et retombe sur un délai de repos.
+- Catalogue en version 10 (`vms.<nom>.pool`), migration automatique.
 
 ## [1.9.0] — 2026-09-10
 

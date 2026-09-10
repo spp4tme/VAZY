@@ -353,9 +353,9 @@ Avec `--mode nat --mode hostonly`, la première carte est en NAT et la seconde e
 
 **Piège PowerShell.** La forme `--mode "nat,hostonly"` fonctionne, mais les guillemets sont obligatoires, sinon PowerShell découpe sur la virgule et vazy reçoit deux arguments séparés. Même chose pour la mémoire : écrivez `--ram 1.5` avec un point, ou `--ram "1,5"` avec des guillemets.
 
-Toutes les machines en `hostonly` partagent le même segment : deux labos montés en même temps en host-only se voient mutuellement. Pour un réseau réellement isolé, voir les [segments personnalisés](#54-segments-réseau-isolés).
+Toutes les machines en `hostonly` partagent le même segment : deux labos montés en même temps en host-only se voient mutuellement. Pour un réseau réellement isolé, voir les [segments personnalisés](#53-segments-réseau-isolés).
 
-### 5.4 Segments réseau isolés
+### 5.3 Segments réseau isolés
 
 `hostonly` met **toutes** vos VM sur le même réseau. Dès qu'un TP demande deux réseaux distincts — un routeur entre une DMZ et un LAN, une machine coupée du reste — il faut un segment personnalisé.
 
@@ -399,7 +399,7 @@ Les commandes :
 
 vazy vérifie avant chaque création de VM que le segment demandé existe toujours. Un segment supprimé à la main dans le Virtual Network Editor est signalé au lieu de donner une VM branchée dans le vide.
 
-### 5.3 Ce que vous voyez
+### 5.4 Ce que vous voyez
 
 ```
 vazy : création d'une VM depuis le modèle « ubuntu-server »
@@ -421,7 +421,7 @@ VM « TP14 » prête et démarrée en 12,4 s.
   arrêter : vazy stop TP14     supprimer : vazy rm TP14
 ```
 
-### 5.4 Le cycle de vie
+### 5.5 Le cycle de vie
 
 | Commande | Effet |
 |---|---|
@@ -433,6 +433,67 @@ VM « TP14 » prête et démarrée en 12,4 s.
 Les états affichés par `vazy list` : `en marche`, `arrêtée`, ou `absente` quand les fichiers ont disparu du disque en dehors de vazy.
 
 vazy n'écrase jamais rien. Un nom déjà pris ou un dossier déjà présent produit un refus, pas un remplacement silencieux.
+
+### 5.6 Réserve de VM chaudes
+
+Créer une VM prend une trentaine de secondes, dont l'essentiel est le démarrage du système. L'idée de la réserve : **payer ce démarrage à l'avance**.
+
+```
+vazy pool create ubuntu-server --size 3     # une fois, tranquillement
+vazy pop ubuntu-server --name TP14          # deux à trois secondes
+```
+
+`pool create` crée les clones, les démarre, puis les **suspend** : leur mémoire part sur le disque. `pop` en reprend une — VMware recharge la mémoire, la machine repart exactement où elle en était. Aucun redémarrage, donc aucun boot à attendre.
+
+| Commande | Effet |
+|---|---|
+| `vazy pool create <modele> --size <n>` | Prépare `n` VM démarrées puis figées. Accepte les options de gabarit : `--ram`, `--cpu`, `--mode`, `--set` |
+| `vazy pop <modele> [--name <nom>] [--hostname <h>]` | Réveille une VM, lui donne son identité, la sort de la réserve |
+| `vazy pool status [<modele>]` | Stock disponible, état de chaque VM, place occupée |
+| `vazy pool refill <modele> [--size <n>]` | Complète la réserve jusqu'à la taille voulue |
+| `vazy pool destroy <modele> [--yes]` | Détruit la réserve et libère la place |
+
+#### Le vrai problème : l'identité au réveil
+
+C'est là que tout se joue, et ça mérite d'être compris avant de s'en servir.
+
+Une machine suspendue fige **tout** : son nom d'hôte, son bail DHCP, ses clés SSH en mémoire, son horloge. Réveiller deux VM de la même réserve donnerait deux jumelles sur le réseau. Et comme il n'y a pas de redémarrage, le service `vazy-guestinfo` de l'invité — qui s'exécute au boot — ne se relance pas de lui-même.
+
+La solution est une poignée de main entre vazy et l'invité :
+
+1. Au moment de garnir la réserve, vazy dépose `mode: pool` dans la configuration de l'invité.
+2. Le script du modèle reconnaît ce mode. Il fait le strict nécessaire — régénérer les clés SSH et l'identifiant machine, qui ne dépendent pas de l'identité demandée — puis **annonce qu'il est prêt** en posant une variable, et se met à attendre en tâche de fond.
+3. vazy voit cette variable et suspend. L'attente est figée avec la machine.
+4. Au `pop`, vazy dépose la vraie identité **avant** de reprendre. L'invité, qui attendait, la lit et l'applique : nom d'hôte, puis renouvellement du bail DHCP pour ne pas garder celui d'avant.
+
+Tout cela suppose donc un modèle **marqué guestinfo**, avec le script d'invité à jour (voir [section 11](#11-personnalisation-de-linvité)).
+
+#### Sans script à jour
+
+Si le modèle porte un script d'ancienne génération, la variable n'arrive jamais. vazy ne reste pas bloqué : il retombe sur l'attente des outils invité plus un délai de repos, prévient, et fige quand même. La réserve fonctionne, mais **les VM réveillées gardent l'identité du modèle** — même nom d'hôte, même bail. Utilisable pour une VM isolée, à éviter pour un TP réseau.
+
+#### Windows
+
+Sous Windows, un renommage exige un redémarrage : la réserve perd alors une bonne part de son intérêt, puisqu'on repaye le boot qu'on voulait éviter. `pop` fonctionne et réveille bien la machine, mais si vous demandez un nom d'hôte, le renommage passera par la voie classique avec redémarrage.
+
+**En clair : la réserve est faite pour Linux.** Sous Windows, elle ne vaut le coup que si le nom d'hôte vous est indifférent.
+
+#### Ce que ça coûte
+
+Une VM suspendue écrit sa mémoire sur le disque : une réserve de 3 VM à 4 Go, c'est 12 Go de plus, en plus des disques de différences. vazy vérifie la place avant de garnir, exactement comme pour une création, et `vazy pool status` affiche le coût réel.
+
+#### Péremption
+
+Si le modèle change — un instantané supprimé, un disque consolidé — les VM de la réserve deviennent inutilisables : elles démarreraient sur des disques qui ne sont plus les leurs. `vazy pool status` les marque **périmées** et `vazy pop` refuse de les servir, en indiquant quoi faire :
+
+```
+vazy pool destroy ubuntu-server
+vazy pool create ubuntu-server --size 3
+```
+
+#### Ce qu'une VM de réserve n'est pas
+
+Elle n'apparaît pas dans `vazy list` : c'est un stock, pas une machine de travail. Et elle n'est **jamais** ramassée par le nettoyage des VM éphémères, quel que soit son état.
 
 ---
 
@@ -944,6 +1005,16 @@ Deux variables d'environnement, utiles pour les essais :
 | `vazy rm <nom> [--yes]` | Supprime la VM et ses fichiers, après confirmation |
 | `vazy gc [--yes]` | Supprime les VM éphémères éteintes |
 
+**Réserve de VM chaudes** — voir [section 5.6](#56-réserve-de-vm-chaudes)
+
+| Commande | Effet |
+|---|---|
+| `vazy pool create <modele> --size <n> [--ram <Go>] [--cpu <n>] [--mode <m>] [--set <k>=<v>]` | Prépare `n` VM démarrées puis figées |
+| `vazy pop <modele> [--name <nom>] [--hostname <h>] [--nogui]` | Réveille une VM de la réserve et lui donne son identité |
+| `vazy pool status [<modele>]` | Stock, état de chaque VM, place occupée |
+| `vazy pool refill <modele> [--size <n>]` | Complète la réserve |
+| `vazy pool destroy <modele> [--yes]` | Détruit la réserve |
+
 **Instantanés**
 
 | Commande | Effet |
@@ -1116,7 +1187,7 @@ VMware peut laisser un dossier incomplet. Supprimez-le à la main, puis relancez
 Ce qui est volontairement hors périmètre :
 
 - **Redimensionner le disque.** Compliqué sur un clone lié, et inutile si le modèle a été créé avec un disque dynamique très large, comme recommandé à la [section 4.1](#41-créer-la-vm-dans-vmware-workstation).
-- **Adressage fin d'un segment.** `vazy net add` pose l'adresse du réseau et, en option, un serveur DHCP. Le reste — plage DHCP, passerelle, routes — se règle dans le Virtual Network Editor. Voir les [segments réseau isolés](#54-segments-réseau-isolés) pour ce qui est couvert.
+- **Adressage fin d'un segment.** `vazy net add` pose l'adresse du réseau et, en option, un serveur DHCP. Le reste — plage DHCP, passerelle, routes — se règle dans le Virtual Network Editor. Voir les [segments réseau isolés](#53-segments-réseau-isolés) pour ce qui est couvert.
 - **Autres hyperviseurs.** Seul VMware Workstation est pris en charge. L'architecture est prête pour VirtualBox et Hyper-V, voir la [section 18](#18-architecture).
 - **Interface graphique.** Aucune, et ce n'est pas prévu.
 - **Identité complète de l'invité.** Le nom d'hôte est appliqué, et un modèle guestinfo régénère les clés SSH du serveur et l'identifiant machine. Restent identiques d'un clone à l'autre : le SID Windows, qui demande `sysprep`, et la configuration IP, qui reste en DHCP.
@@ -1189,7 +1260,7 @@ La protection du modèle et l'autonomie :
 | `Get-MachineDisqueGo -Machine` | Capacité déclarée des disques |
 | `Protect-MachineModele`, `Unprotect-MachineModele`, `Test-MachineModele` | Pose, retire et teste la marque de modèle |
 
-Les segments réseau isolés (voir [section 5.4](#54-segments-réseau-isolés)) :
+Les segments réseau isolés (voir [section 5.4](#53-segments-réseau-isolés)) :
 
 | Fonction | Rôle |
 |---|---|

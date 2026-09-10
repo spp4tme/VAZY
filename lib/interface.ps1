@@ -118,6 +118,15 @@ USAGE
                                      arrête et supprime tout le labo (--stop-only : arrête sans supprimer)
   vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
                                      génère le fichier de labo qui recréerait des VM existantes
+  vazy pool create <modele> --size <n> [--ram <Go>] [--cpu <n>] [--mode <m>]
+                                     prépare n VM déjà démarrées puis figées : les sortir
+                                     prend quelques secondes au lieu d'une trentaine
+  vazy pop <modele> [--name <nom>] [--hostname <h>] [--nogui]
+                                     réveille une VM de la réserve et lui donne son identité
+  vazy pool status [<modele>]        stock disponible, état et place occupée
+  vazy pool refill <modele> [--size <n>]
+                                     complète la réserve jusqu'à la taille voulue
+  vazy pool destroy <modele> [--yes] détruit la réserve et libère la place
   vazy net list                      segments réseau personnalisés déclarés, et leurs VM
   vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
                                      crée un segment isolé (droits administrateur requis
@@ -203,7 +212,7 @@ function New-ErreurUsage {
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
     $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os',
-                           'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse')
+                           'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse', 'size', 'out')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
                            'dry-run', 'requis', 'tout', 'save', 'dhcp')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
@@ -901,6 +910,98 @@ function Invoke-CommandeUnsnap {
     Remove-InstantaneVm -Nom $nom -Libelle $libelle | Out-Null
 }
 
+# vazy pool create <modele> --size <n> | status [<modele>] | refill <modele> [--size <n>] | destroy <modele>
+function Invoke-CommandePool {
+    param($Analyse)
+    $o = $Analyse.Options
+    $sous = if ($Analyse.Positionnels.Count -ge 2) { $Analyse.Positionnels[1].ToLower() } else { 'status' }
+    switch ($sous) {
+
+        'status' {
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $modele = if ($Analyse.Positionnels.Count -ge 3) { $Analyse.Positionnels[2] } else { '' }
+            $liste = @(Get-StatutPool -Modele $modele)
+            if ($liste.Count -eq 0) {
+                Write-Host 'Aucune VM en réserve.' -ForegroundColor Gray
+                Write-Host 'Une réserve garde des VM déjà démarrées puis figées : les sortir prend quelques secondes au lieu d''une trentaine.' -ForegroundColor Gray
+                Write-Host 'Pour en créer une : vazy pool create <modele> --size 3' -ForegroundColor Gray
+                return
+            }
+            $tab = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($r in $liste) {
+                $tab.Add(@($r.Nom, $r.Modele, $r.Etat, ('{0} Go' -f $r.RamGo), [string]$r.Cpu, $r.Reseau,
+                           ('{0:0.##} Go' -f $r.SuspensionGo), ('{0:0.##} Go' -f $r.TotalGo)))
+            }
+            Write-Tableau -EnTetes @('VM', 'Modèle', 'État', 'RAM', 'CPU', 'Réseau', 'Mémoire figée', 'Total disque') -Lignes $tab.ToArray()
+            $pretes = @($liste | Where-Object { $_.Etat -eq 'prête' }).Count
+            $totalGo = ($liste | Measure-Object -Property TotalGo -Sum).Sum
+            Write-Host ('  {0} VM prête(s) sur {1}, {2:0.##} Go occupés au total.' -f $pretes, $liste.Count, $totalGo) -ForegroundColor Gray
+            if (@($liste | Where-Object { $_.Etat -eq 'périmée' }).Count -gt 0) {
+                Write-Host '  Des VM sont périmées : leur modèle a changé. vazy pool destroy <modele> puis vazy pool create.' -ForegroundColor Yellow
+            }
+        }
+
+        'create' {
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage 'Usage : vazy pool create <modele> --size <n> [--ram <Go>] [--cpu <n>] [--mode <m>]') }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            if (-not $o.ContainsKey('size')) { throw (New-ErreurUsage 'Indiquez la taille de la réserve : vazy pool create <modele> --size 3') }
+            $taille = ConvertTo-Entier -Texte $o['size'] -Option 'size' -Min 1 -Max 20
+            $ramGo  = if ($o.ContainsKey('ram')) { ConvertTo-RamGo -Texte $o['ram'] } else { 2 }
+            $cpu    = if ($o.ContainsKey('cpu')) { ConvertTo-Entier -Texte $o['cpu'] -Option 'cpu' -Min 1 -Max 64 } else { 2 }
+            $modeTexte = Add-ReseauxNommesAuxModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) -Segments $Analyse.Segments.ToArray()
+            $modes  = @(Resolve-ModesReseau -Modes (ConvertTo-ListeModes -ModeTexte $modeTexte -ReseauTexte $(if ($o.ContainsKey('reseau')) { $o['reseau'] } else { $null })))
+            New-Pool -Modele $Analyse.Positionnels[2] -Taille $taille -RamGo $ramGo -Cpu $cpu -Modes $modes -Brut $Analyse.Sets.ToArray() | Out-Null
+            Write-Host ''
+            Write-Host ('Pour en sortir une : vazy pop {0} --name <nom>' -f $Analyse.Positionnels[2]) -ForegroundColor Gray
+        }
+
+        'refill' {
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage 'Usage : vazy pool refill <modele> [--size <n>]') }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $taille = if ($o.ContainsKey('size')) { ConvertTo-Entier -Texte $o['size'] -Option 'size' -Min 1 -Max 20 } else { 0 }
+            Invoke-PoolRefill -Modele $Analyse.Positionnels[2] -Taille $taille | Out-Null
+        }
+
+        'destroy' {
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage 'Usage : vazy pool destroy <modele> [--yes]') }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $modele = $Analyse.Positionnels[2]
+            if (-not $o.ContainsKey('yes')) {
+                $combien = @(Get-StatutPool -Modele $modele).Count
+                if (-not (Read-Confirmation -Question "Détruire la réserve de « $modele » ($combien VM) ?")) {
+                    Write-Host 'Abandon.' -ForegroundColor Gray
+                    return
+                }
+            }
+            Remove-Pool -Modele $modele | Out-Null
+        }
+
+        default {
+            throw (New-ErreurUsage "Sous-commande inconnue : « $sous ». Usage : vazy pool create <modele> --size <n> | status [<modele>] | refill <modele> | destroy <modele>")
+        }
+    }
+}
+
+# vazy pop <modele> [--name <nom>] [--hostname <h>] [--nogui]
+function Invoke-CommandePop {
+    param($Analyse)
+    if ($Analyse.Positionnels.Count -lt 2) { throw (New-ErreurUsage 'Usage : vazy pop <modele> [--name <nom>] [--hostname <h>]') }
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 2
+    $o = $Analyse.Options
+    $nom     = if ($o.ContainsKey('name')) { $o['name'].Trim() } else { '' }
+    $nomHote = if ($o.ContainsKey('hostname')) { $o['hostname'].Trim() } else { $nom }
+    if ($nomHote) {
+        $probleme = Test-NomHote -NomHote $nomHote
+        if ($probleme) { throw (New-ErreurUsage "--hostname : $probleme") }
+    }
+    $r = Invoke-Pop -Modele $Analyse.Positionnels[1] -Nom $nom -NomHote $nomHote -SansInterface:($o.ContainsKey('nogui'))
+    Write-Host ''
+    Write-Host ('  {0} VM restante(s) en réserve.' -f $r.Restantes) -ForegroundColor Gray
+    if ($r.Restantes -eq 0) {
+        Write-Host ('  Réserve vide : vazy pool refill {0} --size <n>' -f $Analyse.Positionnels[1]) -ForegroundColor Gray
+    }
+}
+
 # vazy net list | add <nom> [--adresse a.b.c.0] [--dhcp] | rm <nom>
 function Invoke-CommandeNet {
     param($Analyse)
@@ -1416,6 +1517,8 @@ try {
             'gc'       { Invoke-CommandeGc       -Analyse $analyse }
             'lab'      { Invoke-CommandeLab      -Analyse $analyse }
             'net'      { Invoke-CommandeNet      -Analyse $analyse }
+            'pool'     { Invoke-CommandePool     -Analyse $analyse }
+            'pop'      { Invoke-CommandePop      -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }
