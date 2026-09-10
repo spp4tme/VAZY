@@ -856,11 +856,47 @@ Après chaque démarrage, vazy attend que les outils invité répondent, avec de
 
 Deux limites à connaître. `vmrun` ne reçoit les identifiants que par des options de sa ligne de commande, visibles pendant les quelques secondes de l'appel pour les processus de votre compte Windows. Et surtout, ce compte privilégié est cloné dans toutes vos VM.
 
-### 11.3 Règle absolue
+### 11.3 Adressage statique et clé SSH
+
+Un TP de réseau se passe mal avec des adresses attribuées au hasard par le DHCP. Cinq options les fixent, appliquées par le même mécanisme guestinfo :
+
+```
+vazy debian --name routeur --ip 192.168.100.1 --masque 24 --dns 1.1.1.1
+```
+
+| Option | Effet |
+|---|---|
+| `--ip <adresse>` | Adressage statique au lieu du DHCP. Exige `--masque` |
+| `--masque <m>` | `255.255.255.0` ou la longueur du préfixe : `24` |
+| `--passerelle <ip>` | Passerelle par défaut |
+| `--dns <a,b>` | Serveurs DNS, séparés par des virgules |
+| `--cle-ssh <cle>` | Clé publique ajoutée aux clés autorisées du compte de l'invité |
+
+Dans un fichier de labo, les mêmes clés se déclarent **par machine** — c'est là que ça devient vraiment utile, puisque tout le plan d'adressage du TP tient dans le fichier :
+
+```json
+"routeur": { "modele": "debian", "mode": ["nat", "hostonly"],
+             "ip": "192.168.100.1", "masque": 24 },
+"web":     { "modele": "debian", "mode": "hostonly",
+             "ip": "192.168.100.10", "masque": 24, "passerelle": "192.168.100.1",
+             "dns": "192.168.100.1" }
+```
+
+`vazy lab export` réémet ces clés : un labo exporté reste rejouable tel quel.
+
+**Trois choses à savoir.**
+
+Ces options exigent un modèle **marqué guestinfo** avec le script d'invité à jour. Sur un modèle en repli par identifiants, vazy prévient et n'applique que le nom d'hôte.
+
+Côté invité, l'application passe par **netplan** (Ubuntu récent) ou **systemd-networkd**, sur la première interface réseau réelle. C'est idempotent : une configuration déjà en place n'est pas réécrite et rien n'est redémarré.
+
+Sans aucune de ces options, **rien ne change** : la charge utile ne contient que le nom d'hôte, et l'invité reste en DHCP comme avant.
+
+### 11.4 Règle absolue
 
 Si la personnalisation échoue, pour quelque raison que ce soit, **la VM reste créée et démarrée**. vazy avertit en donnant la cause et la marche à suivre, mais n'annule rien. Une VM utilisable avec un mauvais nom d'hôte vaut mieux qu'une VM supprimée.
 
-Ce qui n'est pas fait dans cette version : IP fixe, clé SSH de l'utilisateur, SID Windows. Le format et le script sont prêts à les accueillir.
+Ce qui n'est pas fait dans cette version : le SID Windows. Le format et le script sont prêts à l'accueillir.
 
 ---
 

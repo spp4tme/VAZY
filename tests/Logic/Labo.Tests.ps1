@@ -14,7 +14,8 @@ function New-MachineLaboTest {
         [int]$Cpu = 2,
         [string[]]$Modes = @('nat'),
         [string[]]$Apres = @(),
-        [switch]$SansDemarrage
+        [switch]$SansDemarrage,
+        $ConfigInvite = $null
     )
     return [pscustomobject]@{
         Nom           = $Nom
@@ -28,6 +29,7 @@ function New-MachineLaboTest {
         SansInterface = $false
         SansDemarrage = [bool]$SansDemarrage
         Apres         = $Apres
+        ConfigInvite  = $ConfigInvite
     }
 }
 

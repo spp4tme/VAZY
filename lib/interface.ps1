@@ -165,6 +165,13 @@ OPTIONS DE CRÉATION (toutes facultatives)
                      (incompatible avec --nostart)
   --hostname <nom>   nom d'hôte appliqué dans l'invité à chaque démarrage (modèle guestinfo :
                      vazy template mark <modele> --guestinfo ; repli : vazy template creds)
+  --ip <adresse>     adressage statique dans l'invité, au lieu du DHCP. Demande --masque.
+  --masque <m>       255.255.255.0 ou la longueur du préfixe : 24
+  --passerelle <ip>  passerelle par défaut
+  --dns <a,b>        serveurs DNS, séparés par des virgules
+  --cle-ssh <cle>    clé publique ajoutée aux clés autorisées du compte de l'invité
+                     Ces cinq options exigent un modèle marqué guestinfo. Dans un fichier
+                     de labo, mêmes clés par machine : ip, masque, passerelle, dns, cle_ssh.
   --vnc [off]        écran de la VM accessible à distance : vazy choisit un port libre, tire
                      un mot de passe, et affiche un lien vnc:// à appuyer depuis le téléphone
 
@@ -212,7 +219,8 @@ function New-ErreurUsage {
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
     $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os',
-                           'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse', 'size', 'out')
+                           'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse', 'size', 'out',
+                           'ip', 'masque', 'passerelle', 'dns', 'cle-ssh')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
                            'dry-run', 'requis', 'tout', 'save', 'dhcp')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
@@ -377,6 +385,52 @@ function Add-ReseauxNommesAuxModes {
     return ($ModeTexte + ',' + $ajout)
 }
 
+# Rassemble --ip / --masque / --passerelle / --dns / --cle-ssh en un bloc que la
+# logique déposera dans l'invité. Renvoie $null si rien n'est demandé, pour que
+# le comportement DHCP d'origine reste strictement inchangé.
+function ConvertTo-ConfigInvite {
+    param([hashtable]$Options)
+    $correspondance = @{ ip = 'ip'; masque = 'masque'; passerelle = 'passerelle'; 'cle-ssh' = 'cle_ssh' }
+    $config = [ordered]@{}
+    $renseigne = $false
+    foreach ($option in $correspondance.Keys) {
+        if ($Options.ContainsKey($option) -and [string]$Options[$option]) {
+            $config[$correspondance[$option]] = ([string]$Options[$option]).Trim()
+            $renseigne = $true
+        }
+    }
+    if ($Options.ContainsKey('dns') -and [string]$Options['dns']) {
+        $serveurs = @(([string]$Options['dns']) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($serveurs.Count -gt 0) { $config['dns'] = $serveurs; $renseigne = $true }
+    }
+    if (-not $renseigne) { return $null }
+    return $config
+}
+
+# Même chose depuis une machine décrite dans un fichier de labo.
+function ConvertTo-ConfigInviteJson {
+    param($Definition)
+    $config = [ordered]@{}
+    $renseigne = $false
+    foreach ($cle in @('ip', 'masque', 'passerelle', 'cle_ssh')) {
+        if ($Definition.PSObject.Properties[$cle] -and [string]$Definition.$cle) {
+            $config[$cle] = ([string]$Definition.$cle).Trim()
+            $renseigne = $true
+        }
+    }
+    if ($Definition.PSObject.Properties['dns'] -and $null -ne $Definition.dns) {
+        $serveurs = if ($Definition.dns -is [array]) {
+            @($Definition.dns | ForEach-Object { ([string]$_).Trim() })
+        } else {
+            @(([string]$Definition.dns) -split ',' | ForEach-Object { $_.Trim() })
+        }
+        $serveurs = @($serveurs | Where-Object { $_ })
+        if ($serveurs.Count -gt 0) { $config['dns'] = $serveurs; $renseigne = $true }
+    }
+    if (-not $renseigne) { return $null }
+    return $config
+}
+
 # Valeur d'une option à valeur facultative (--vnc / --vnc off) -> booléen.
 function Test-OptionActivee {
     param($Analyse, [string]$Nom)
@@ -468,7 +522,8 @@ function Read-FichierLabo {
         $e = New-ErreurOutil "Fichier $fichier : la clé « machines » manque ou n'est pas un objet { \"nom\": { ... }, ... }." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
     }
 
-    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'reseau-nomme', 'set', 'nogui', 'nostart', 'apres', 'hostname', 'vnc')
+    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'reseau-nomme', 'set', 'nogui', 'nostart', 'apres', 'hostname', 'vnc',
+                     'ip', 'masque', 'passerelle', 'dns', 'cle_ssh')
     $machines = @()
     foreach ($p in $json.machines.PSObject.Properties) {
         $nomMachine = $p.Name
@@ -528,6 +583,7 @@ function Read-FichierLabo {
             $machines += [pscustomobject]@{
                 Nom = $nomMachine; Modele = ([string]$def.modele).Trim(); RamGo = $ramGo; Cpu = $cpu; Modes = @($modes); Brut = @($brut)
                 SansInterface = $nogui; SansDemarrage = $nostart; Apres = @($apres); NomHote = $nomHote; Vnc = $vnc
+                ConfigInvite = (ConvertTo-ConfigInviteJson -Definition $def)
             }
         } catch {
             $e = New-ErreurOutil ("Fichier {0}, machine « {1} » : {2}" -f $fichier, $nomMachine, $_.Exception.Message) $conseilFormat
@@ -551,6 +607,13 @@ function ConvertTo-DescriptionLabo {
     $modes = ConvertTo-ListeModes -ModeTexte (Add-ReseauxNommesAuxModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) -Segments $Analyse.Segments.ToArray()) `
                                   -ReseauTexte $(if ($o.ContainsKey('reseau')) { $o['reseau'] } else { $null })
     $modes = @(Resolve-ModesReseau -Modes $modes)
+    # L'adressage donné en ligne de commande s'applique à toutes les machines :
+    # utile pour la passerelle et le DNS, à éviter pour --ip qui les mettrait
+    # toutes à la même adresse. Le fichier de labo est fait pour ça.
+    $configInvite = ConvertTo-ConfigInvite -Options $o
+    if ($null -ne $configInvite -and [string]$configInvite['ip'] -and @($Analyse.Vms).Count -gt 1) {
+        throw (New-ErreurUsage "--ip avec plusieurs --vm : les machines recevraient toutes la même adresse. Donnez l'adressage machine par machine dans un fichier de labo (clés ip, masque, passerelle, dns).")
+    }
     $brut = $Analyse.Sets.ToArray()
     $vnc = Test-OptionActivee -Analyse $Analyse -Nom 'vnc'
     $sansInterface = $o.ContainsKey('nogui')
@@ -579,6 +642,7 @@ function ConvertTo-DescriptionLabo {
         $machines += [pscustomobject]@{
             Nom = $nomMachine; Modele = $morceaux[1].Trim(); RamGo = $ram; Cpu = $cpu; Modes = @($modes); Brut = @($brut)
             SansInterface = $sansInterface; SansDemarrage = $sansDemarrage; Apres = @(); NomHote = $nomHote; Vnc = $vnc
+            ConfigInvite = $configInvite
         }
     }
     # Sans dépendance déclarée, les machines démarrent dans l'ordre où elles
@@ -645,6 +709,7 @@ function Invoke-CommandeCreation {
     # .ToArray() et non @(...) : en PowerShell 5.1, @() sur une List[object] vide échoue.
     $resultat = New-VmDepuisModele -Modele $modele -Nom $nom -RamGo $ramGo -Cpu $cpu -Modes $modes -Brut $Analyse.Sets.ToArray() `
                                    -SansInterface:$o.ContainsKey('nogui') -SansDemarrage:$o.ContainsKey('nostart') -Ephemere:$o.ContainsKey('tmp') -NomHote $nomHote `
+                                   -ConfigInvite (ConvertTo-ConfigInvite -Options $o) `
                                    -Vnc:(Test-OptionActivee -Analyse $Analyse -Nom 'vnc')
 
     Write-Host ''
@@ -994,7 +1059,8 @@ function Invoke-CommandePop {
         $probleme = Test-NomHote -NomHote $nomHote
         if ($probleme) { throw (New-ErreurUsage "--hostname : $probleme") }
     }
-    $r = Invoke-Pop -Modele $Analyse.Positionnels[1] -Nom $nom -NomHote $nomHote -SansInterface:($o.ContainsKey('nogui'))
+    $r = Invoke-Pop -Modele $Analyse.Positionnels[1] -Nom $nom -NomHote $nomHote `
+                    -ConfigInvite (ConvertTo-ConfigInvite -Options $o) -SansInterface:($o.ContainsKey('nogui'))
     Write-Host ''
     Write-Host ('  {0} VM restante(s) en réserve.' -f $r.Restantes) -ForegroundColor Gray
     if ($r.Restantes -eq 0) {

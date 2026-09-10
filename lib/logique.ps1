@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:NomOutil       = 'vazy'
 $script:VersionOutil   = '1.9.0'
-$script:VersionCatalogue = 10         # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionCatalogue = 11         # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -261,6 +261,10 @@ function Save-Config {
 #                 réserve chaude, '' pour une VM ordinaire). Une VM de pool
 #                 n'apparaît pas dans « vazy list » et n'est jamais ramassée
 #                 par le nettoyage des éphémères.
+#   version 11 : + vms.<nom>.invite { ip, masque, passerelle, dns, cle_ssh } :
+#                 configuration réseau statique et clé SSH déposées dans
+#                 l'invité par guestinfo. Vide = adressage laissé au DHCP,
+#                 comportement d'avant.
 #   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
 #   migration destructive.
 function Read-Catalogue {
@@ -293,6 +297,10 @@ function Read-Catalogue {
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('pool')) {
             $vm['pool'] = ''             # VM d'avant la v10 : jamais en réserve
+            $modifie = $true
+        }
+        if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('invite')) {
+            $vm['invite'] = New-Dictionnaire   # VM d'avant la v11 : adressage laissé au DHCP
             $modifie = $true
         }
         if ($vm -is [System.Collections.IDictionary] -and -not $vm.Contains('nomHote')) {
@@ -582,6 +590,7 @@ function Get-VmDuCatalogue {
             Ephemere = ($vm['ephemere'] -eq $true)
             Labo = [string]$vm['labo']
             Pool = [string]$vm['pool']          # alias du modèle si la VM est en réserve, sinon ''
+            ConfigInvite = $vm['invite']        # ip, masque, passerelle, dns, cle_ssh
             NomHote = [string]$vm['nomHote']
             Empreinte = $vm['empreinte']
             Sets = @($vm['sets'])
@@ -617,6 +626,7 @@ function New-VmDepuisModele {
         [switch]$Ephemere,              # --tmp : VM jetable, supprimée dès qu'elle est trouvée éteinte
         [string]$Labo = '',             # nom du labo propriétaire (vazy lab up), vide sinon
         [string]$Pool = '',             # alias du modèle si la VM part en réserve chaude, vide sinon
+        $ConfigInvite = $null,          # ip, masque, passerelle, dns, cle_ssh (guestinfo)
         [string]$NomHote = '',          # nom d'hôte à appliquer dans l'invité après démarrage (phase 4), vide = rien
         [switch]$Vnc                    # --vnc : écran de la VM accessible à distance
     )
@@ -659,6 +669,7 @@ function New-VmDepuisModele {
     }
 
     Test-ReseauxDemandes -Modes $Modes
+    Test-ConfigInvite -Config $ConfigInvite
     $dossierRacine = Get-DossierVms -Modele $infosModele
     if ($Nom) {
         Test-NomValide -Nom $Nom
@@ -751,6 +762,7 @@ function New-VmDepuisModele {
     $fiche['ephemere'] = $false      # posé à $true seulement une fois la VM démarrée (voir ci-dessous)
     $fiche['labo']     = $Labo
     $fiche['pool']     = $Pool
+    $fiche['invite']   = $(if ($null -ne $ConfigInvite) { $ConfigInvite } else { New-Dictionnaire })
     $fiche['nomHote']  = $NomHote    # appliqué à chaque démarrage par vazy (voir Start-VmAvecPersonnalisation)
     # Empreinte des disques de base du modèle : un clone lié y lit en
     # permanence. Vérifiée avant chaque démarrage (voir Test-ModeleIntact).
@@ -1280,7 +1292,8 @@ function Invoke-LaboUp {
         $nomVm = Get-NomVmLabo -Labo $Labo -Machine $m.Nom
         Publish-Message 'etape' ("Création {0}/{1} : {2} -> VM « {3} »" -f $n, $aCreer.Count, $m.Nom, $nomVm)
         try {
-            New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote -Vnc:$m.Vnc | Out-Null
+            New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) `
+                               -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote -ConfigInvite $m.ConfigInvite -Vnc:$m.Vnc | Out-Null
             $creeesIci.Add($nomVm)
         } catch {
             $defaites = $creeesIci.Count
@@ -1446,6 +1459,15 @@ function Export-Labo {
         elseif ($modes.Count -gt 1) { $entree['mode'] = $modes }
         if ($segments.Count -eq 1) { $entree['reseau-nomme'] = $segments[0] }
         elseif ($segments.Count -gt 1) { $entree['reseau-nomme'] = $segments }
+        # Adressage statique : réexporté tel quel, c'est souvent le cœur du TP.
+        $invite = $vm.ConfigInvite
+        if ($null -ne $invite) {
+            foreach ($cle in @('ip', 'masque', 'passerelle', 'cle_ssh')) {
+                if ($invite.Contains($cle) -and [string]$invite[$cle]) { $entree[$cle] = [string]$invite[$cle] }
+            }
+            $dns = @($invite['dns'] | Where-Object { $_ })
+            if ($dns.Count -eq 1) { $entree['dns'] = $dns[0] } elseif ($dns.Count -gt 1) { $entree['dns'] = $dns }
+        }
         if ($vm.NomHote -and $vm.NomHote -ine $court) { $entree['hostname'] = $vm.NomHote }
         elseif (-not $vm.NomHote) { $entree['hostname'] = $false }
         if ($vm.VncActif) { $entree['vnc'] = $true }
@@ -2090,15 +2112,114 @@ function Set-MarqueModele {
 # d'échappement, quelle que soit la chaîne d'outils). Clés prévues : hostname
 # (seule appliquée aujourd'hui), puis ip, masque, passerelle, dns, cle_ssh.
 # Le script invité ignore toute clé qu'il ne connaît pas.
+# Une adresse IPv4 en quatre octets valides. Le format seul : on ne juge pas de
+# la cohérence entre adresse, masque et passerelle, qui dépend du TP.
+function Test-AdresseIpv4 {
+    param([string]$Adresse)
+    if ($Adresse -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $false }
+    foreach ($octet in ($Adresse -split '\.')) { if ([int]$octet -gt 255) { return $false } }
+    return $true
+}
+
+# Contrôle du bloc réseau demandé, avec des refus qui disent quoi corriger.
+# Accepte un masque en notation pointée (255.255.255.0) ou en longueur (24).
+function Test-ConfigInvite {
+    param($Config)
+    if ($null -eq $Config) { return }
+    foreach ($cle in @('ip', 'passerelle')) {
+        $valeur = [string]$Config[$cle]
+        if ($valeur -and -not (Test-AdresseIpv4 $valeur)) {
+            throw (New-ErreurOutil "Adresse invalide pour « $cle » : $valeur" 'Quatre nombres de 0 à 255 séparés par des points, par exemple 192.168.100.10.')
+        }
+    }
+    $masque = [string]$Config['masque']
+    if ($masque) {
+        $longueur = 0
+        if ([int]::TryParse($masque, [ref]$longueur)) {
+            if ($longueur -lt 1 -or $longueur -gt 32) {
+                throw (New-ErreurOutil "Longueur de masque invalide : $masque" 'Entre 1 et 32, par exemple 24. La notation pointée (255.255.255.0) est acceptée aussi.')
+            }
+        } elseif (-not (Test-AdresseIpv4 $masque)) {
+            throw (New-ErreurOutil "Masque invalide : $masque" 'Indiquez 255.255.255.0, ou la longueur du préfixe : 24.')
+        }
+    }
+    foreach ($serveur in @($Config['dns'])) {
+        if ($serveur -and -not (Test-AdresseIpv4 ([string]$serveur))) {
+            throw (New-ErreurOutil "Serveur DNS invalide : $serveur" 'Une adresse IPv4 par serveur, séparées par des virgules : --dns 192.168.100.1,1.1.1.1')
+        }
+    }
+    if ([string]$Config['ip'] -and -not $masque) {
+        throw (New-ErreurOutil "Une adresse IP est demandée sans masque." 'Ajoutez --masque 24 (ou 255.255.255.0) : sans lui, l''invité ne sait pas quelle est l''étendue du réseau.')
+    }
+    $cle = [string]$Config['cle_ssh']
+    if ($cle -and $cle -notmatch '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-\S+)\s+\S+') {
+        throw (New-ErreurOutil "La clé SSH ne ressemble pas à une clé publique." 'Attendu : le contenu d''un fichier .pub, par exemple « ssh-ed25519 AAAA... commentaire ».')
+    }
+}
+
+# Masque en longueur de préfixe : 255.255.255.0 -> 24. Rendu tel quel si c'est
+# déjà une longueur. L'invité n'a ainsi qu'une seule forme à traiter.
+function ConvertTo-LongueurPrefixe {
+    param([string]$Masque)
+    if (-not $Masque) { return '' }
+    $longueur = 0
+    if ([int]::TryParse($Masque, [ref]$longueur)) { return [string]$longueur }
+    $bits = 0
+    foreach ($octet in ($Masque -split '\.')) {
+        $v = [int]$octet
+        while ($v -gt 0) { $bits += ($v -band 1); $v = $v -shr 1 }
+    }
+    return [string]$bits
+}
+
+# Y a-t-il quelque chose à déposer dans l'invité, en dehors du nom d'hôte ?
+function Test-ConfigInviteRenseignee {
+    param($Config)
+    if ($null -eq $Config) { return $false }
+    foreach ($cle in @('ip', 'masque', 'passerelle', 'dns', 'cle_ssh')) {
+        if ($Config.Contains($cle) -and @($Config[$cle] | Where-Object { $_ }).Count -gt 0) { return $true }
+    }
+    return $false
+}
+
+# Résumé lisible de l'adressage demandé, pour les messages.
+function Format-ConfigInvite {
+    param($Config)
+    if ($null -eq $Config) { return 'aucun' }
+    $morceaux = @()
+    if ([string]$Config['ip']) {
+        $ip = [string]$Config['ip']
+        $masque = ConvertTo-LongueurPrefixe ([string]$Config['masque'])
+        $morceaux += $(if ($masque) { "$ip/$masque" } else { $ip })
+    }
+    if ([string]$Config['passerelle']) { $morceaux += ('passerelle ' + [string]$Config['passerelle']) }
+    $dns = @($Config['dns'] | Where-Object { $_ })
+    if ($dns.Count -gt 0) { $morceaux += ('DNS ' + ($dns -join ', ')) }
+    if ([string]$Config['cle_ssh']) { $morceaux += 'clé SSH' }
+    if ($morceaux.Count -eq 0) { return 'aucun' }
+    return ($morceaux -join ', ')
+}
+
 function Get-ChargeUtileInvite {
     param(
         [string]$NomHote,
-        [string]$Mode = ''      # 'pool' : l'invité s'arrête avant de fixer son identité
+        [string]$Mode = '',     # 'pool' : l'invité s'arrête avant de fixer son identité
+        $Config = $null         # ip, masque, passerelle, dns, cle_ssh
     )
-    $config = [ordered]@{}
-    if ($Mode) { $config['mode'] = $Mode }
-    $config['hostname'] = $NomHote
-    $json = ConvertTo-Json -InputObject $config -Compress
+    $charge = [ordered]@{}
+    if ($Mode) { $charge['mode'] = $Mode }
+    $charge['hostname'] = $NomHote
+    if ($null -ne $Config) {
+        # Seules les clés renseignées partent : l'invité distingue « non
+        # demandé » (ne touche à rien) de « demandé vide ».
+        if ([string]$Config['ip'])         { $charge['ip']         = [string]$Config['ip'] }
+        if ([string]$Config['masque'])     { $charge['masque']     = ConvertTo-LongueurPrefixe ([string]$Config['masque']) }
+        if ([string]$Config['passerelle']) { $charge['passerelle'] = [string]$Config['passerelle'] }
+        $dns = @($Config['dns'] | Where-Object { $_ })
+        if ($dns.Count -gt 0)              { $charge['dns']        = ($dns -join ',') }
+        if ([string]$Config['cle_ssh'])    { $charge['cle_ssh']    = [string]$Config['cle_ssh'] }
+    }
+    $json = ConvertTo-Json -InputObject $charge -Compress
     return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 }
 
@@ -2120,19 +2241,30 @@ function Start-VmAvecPersonnalisation {
     )
     Test-ModeleIntact -Vm $Vm
     $modele = Get-ModeleDuCatalogue -Alias $Vm.Modele
-    $methode = if ($Vm.NomHote) { Get-MethodePersonnalisation -Alias $Vm.Modele } else { 'aucune' }
-    if ($Vm.NomHote) {
+    $reseauDemande = Test-ConfigInviteRenseignee -Config $Vm.ConfigInvite
+    $aDeposer = ([bool]$Vm.NomHote -or $reseauDemande)
+    $methode = if ($aDeposer) { Get-MethodePersonnalisation -Alias $Vm.Modele } else { 'aucune' }
+    if ($aDeposer) {
         switch ($methode) {
             'guestinfo' {
-                Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote $Vm.NomHote)
-                Publish-Message 'info' ("configuration déposée pour l'invité (guestinfo) : nom d'hôte « {0} », appliquée par le script du modèle à chaque démarrage." -f $Vm.NomHote)
+                Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' `
+                    -Valeur (Get-ChargeUtileInvite -NomHote $Vm.NomHote -Config $Vm.ConfigInvite)
+                $quoi = @()
+                if ($Vm.NomHote)    { $quoi += ("nom d'hôte « {0} »" -f $Vm.NomHote) }
+                if ($reseauDemande) { $quoi += ("adressage {0}" -f (Format-ConfigInvite -Config $Vm.ConfigInvite)) }
+                Publish-Message 'info' ("configuration déposée pour l'invité (guestinfo) : {0}, appliquée par le script du modèle à chaque démarrage." -f ($quoi -join ', '))
             }
             'aucune' {
-                Publish-Message 'info' ("nom d'hôte « {0} » non appliqué : le modèle « {1} » n'est ni marqué guestinfo (vazy template mark {1} --guestinfo) ni doté d'identifiants (vazy template creds {1})." -f $Vm.NomHote, $Vm.Modele)
+                Publish-Message 'info' ("configuration non appliquée : le modèle « {0} » n'est ni marqué guestinfo (vazy template mark {0} --guestinfo) ni doté d'identifiants (vazy template creds {0})." -f $Vm.Modele)
+            }
+            'identifiants' {
+                if ($reseauDemande) {
+                    Publish-Message 'attention' ("l'adressage statique n'est appliqué que par un modèle guestinfo. Le modèle « {0} » utilise le repli par identifiants : seul le nom d'hôte sera posé, l'adresse restera en DHCP." -f $Vm.Modele)
+                }
             }
         }
     } elseif ($modele['guestinfo'] -eq $true) {
-        # Aucun nom demandé : ne laisse traîner aucune configuration antérieure.
+        # Rien à demander : ne laisse traîner aucune configuration antérieure.
         Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' -Valeur ''
     }
     # Le démarrage n'affiche rien tant que la VM n'est pas allumée : quelques
@@ -2793,10 +2925,12 @@ function Invoke-Pop {
         [Parameter(Mandatory = $true)][string]$Modele,
         [string]$Nom = '',
         [string]$NomHote = '',
+        $ConfigInvite = $null,
         [switch]$SansInterface
     )
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     Connect-Pilote | Out-Null
+    Test-ConfigInvite -Config $ConfigInvite
     $alias = Resolve-AliasModele -Alias $Modele
     $candidates = @(Get-VmsDuPool -Modele $alias)
     if ($candidates.Count -eq 0) {
@@ -2837,6 +2971,7 @@ function Invoke-Pop {
     $fiche = $script:Catalogue['vms'][$choisie.Nom]
     $fiche['pool']    = ''
     $fiche['nomHote'] = $NomHote
+    if ($null -ne $ConfigInvite) { $fiche['invite'] = $ConfigInvite }
     $script:Catalogue['vms'].Remove($choisie.Nom)
     $script:Catalogue['vms'][$Nom] = $fiche
     Save-Catalogue
@@ -2845,7 +2980,7 @@ function Invoke-Pop {
 
     # Nouvelle identité déposée avant la reprise : l'invité, qui attend, la lira.
     if ((Get-MethodePersonnalisation -Alias $alias) -eq 'guestinfo') {
-        try { Set-MachineVariableInvite -Machine $choisie.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote $NomHote) }
+        try { Set-MachineVariableInvite -Machine $choisie.Chemin -Nom 'vazy_config' -Valeur (Get-ChargeUtileInvite -NomHote $NomHote -Config $ConfigInvite) }
         catch { Publish-Message 'attention' ("configuration non déposée ({0}) : la VM gardera l'identité du modèle." -f $_.Exception.Message) }
     } elseif ($NomHote) {
         Publish-Message 'attention' ("le modèle « {0} » n'est pas marqué guestinfo : le nom d'hôte « {1} » ne sera pas appliqué au réveil (une VM reprise ne redémarre pas)." -f $alias, $NomHote)
