@@ -4,7 +4,7 @@
   "machines": {
     "dc01":   { "modele": "ubuntu-server", "ram": 4, "cpu": 2, "mode": "hostonly" },
     "srv01":  { "modele": "ubuntu-server", "ram": 2, "mode": "hostonly", "apres": "dc01" },
-    "client": { "modele": "ubuntu-server",   "ram": 4, "mode": ["nat", "hostonly"], "apres": ["dc01", "srv01"],
+    "client": { "modele": "ubuntu-server",   "ram": 4, "mode": "nat", "apres": ["dc01", "srv01"],
                 "set": { "usb.present": "TRUE" }, "nogui": true }
   }
 }

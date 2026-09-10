@@ -122,6 +122,39 @@ Describe 'Creation - refus avant tout appel au pilote' {
     }
 }
 
+Describe 'Creation - retours a l''ecran pendant les temps longs' {
+
+    BeforeEach { Reset-EtatVazy }
+
+    It 'annonce le demarrage AVANT de le lancer, pas apres' {
+        # Un demarrage peut prendre plus d'une minute sans rien afficher. Sans
+        # message prealable, l'utilisateur croit l'outil plante et coupe.
+        New-ModeleTest -Alias 'ubuntu' | Out-Null
+        New-VmDepuisModele -Modele 'ubuntu' -Nom 'poste1' | Out-Null
+
+        (Test-MessageTest 'demarrage de' 'info') -or (Test-MessageTest 'marrage de' 'info') | Should Be $true
+    }
+
+    It 'place ce message avant l''appel au pilote' {
+        New-ModeleTest -Alias 'ubuntu' | Out-Null
+        New-VmDepuisModele -Modele 'ubuntu' -Nom 'poste1' -SansDemarrage | Out-Null
+        Start-VmParNom -Nom 'poste1' | Out-Null
+
+        # Le message « en cours » doit exister, et le message « demarree en X »
+        # arriver apres : c'est l'ordre qui compte.
+        $messages = @(Get-MessagesTest | ForEach-Object { $_.Message })
+        $avant = -1
+        $apres = -1
+        for ($i = 0; $i -lt $messages.Count; $i++) {
+            if ($messages[$i] -like '*en cours*' -and $avant -lt 0) { $avant = $i }
+            if ($messages[$i] -like '*marr*e en*' -and $apres -lt 0) { $apres = $i }
+        }
+        $avant | Should Not Be -1
+        $apres | Should Not Be -1
+        ($avant -lt $apres) | Should Be $true
+    }
+}
+
 Describe 'Creation - nettoyage quand une etape echoue' {
 
     BeforeEach { Reset-EtatVazy }
