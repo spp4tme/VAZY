@@ -186,7 +186,10 @@ function Set-MachineEnMarcheFake {
 # intouchable, quoi que dise le catalogue.
 function Assert-PasModeleFake {
     param([string]$Machine, [string]$Operation)
-    if ($global:VazyFake.Machines.ContainsKey($Machine) -and $global:VazyFake.Machines[$Machine].EstModele) {
+    # Comme le vrai pilote : on interroge Test-MachineModele, qui retombe sur le
+    # fichier témoin. Un modèle enregistré n'existe pas forcément dans l'état
+    # mémoire des machines (il n'a pas été créé par le faux pilote).
+    if (Test-MachineModele -Machine $Machine) {
         throw (New-ErreurFake "Refus de $Operation : $Machine est marquée comme modèle." `
             "Un modèle sert uniquement de base aux clones liés.")
     }
