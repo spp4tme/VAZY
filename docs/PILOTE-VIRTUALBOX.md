@@ -92,6 +92,25 @@ commande à taper : `VBoxManage hostonlyif create`.
 Les cartes au-delà de celles demandées sont explicitement débranchées
 (`--nic<n> none`), pour que la machine reflète exactement ce qui a été demandé.
 
+### Segments réseau isolés
+
+C'est le seul domaine où VirtualBox est **plus simple** que VMware.
+
+| | VMware | VirtualBox |
+|---|---|---|
+| Mécanisme | VMnet2 à VMnet19, via `vnetlib` | réseaux internes (`intnet`) |
+| Création | commande explicite, **droits administrateur** | aucune : le réseau existe dès qu'une machine s'y rattache |
+| Suppression | commande explicite | aucune : il disparaît quand plus personne ne l'utilise |
+| Nombre | 18 au maximum | illimité |
+| Adresse, DHCP | réglables | **aucun** : un réseau interne est un segment de niveau 2 |
+
+`New-ReseauNomme` et `Remove-ReseauNomme` n'ont donc presque rien à faire côté
+VirtualBox. Ce n'est pas un oubli : c'est la nature du mécanisme.
+
+Conséquence pratique : `--adresse` et `--dhcp` sont **ignorés** sous VirtualBox,
+et le pilote l'écrit au journal. Adressez les machines depuis l'intérieur, ou
+placez un serveur DHCP dans le segment — ce qui est souvent l'exercice.
+
 ### Écran distant
 
 VirtualBox n'expose pas de serveur VNC natif. Son mécanisme, VRDE, parle :
@@ -149,7 +168,7 @@ Soyons précis sur ce qui est vérifié et ce qui ne l'est pas.
 | Conformité au contrat (fonctions, paramètres) | vérifiée automatiquement |
 | Validité syntaxique | vérifiée automatiquement |
 | Point de passage unique des commandes | vérifié automatiquement |
-| Non-régression des couches 1 et 2 | vérifiée par 79 tests |
+| Non-régression des couches 1 et 2 | vérifiée par 104 tests |
 | **Comportement face à un vrai VirtualBox** | **jamais exécuté** |
 
 Ce pilote a été écrit d'après la documentation de `VBoxManage`, sans VirtualBox

@@ -38,6 +38,8 @@ function Reset-PiloteFake {
         Appels          = New-Object System.Collections.Generic.List[object]
         Machines        = @{}      # chemin -> état de la machine
         Modeles         = @{}      # chemin -> @{ Instantanes ; Empreinte ; DisqueGo }
+        Reseaux         = @{}      # identifiant -> @{ Adresse ; Masque ; Dhcp }
+        ProchainSegment = 2        # numéro du prochain segment alloué
         Echecs          = @{}      # nom de fonction -> @{ Message ; Conseil ; Restant }
         Systeme         = 'linux'  # ce que renvoie Get-MachineSystemeInvite
         OutilsRepondent = $true    # ce que renvoie Wait-MachineOutils
@@ -64,6 +66,8 @@ function Save-EtatFake {
         DossierTravail  = $global:VazyFake.DossierTravail
         Machines        = $global:VazyFake.Machines
         Modeles         = $global:VazyFake.Modeles
+        Reseaux         = $global:VazyFake.Reseaux
+        ProchainSegment = $global:VazyFake.ProchainSegment
         Systeme         = $global:VazyFake.Systeme
         OutilsRepondent = $global:VazyFake.OutilsRepondent
         CodeScript      = $global:VazyFake.CodeScript
@@ -80,6 +84,8 @@ function Restore-EtatFake {
         $global:VazyFake.DossierTravail  = $lu.DossierTravail
         $global:VazyFake.Machines        = $lu.Machines
         $global:VazyFake.Modeles         = $lu.Modeles
+        if ($null -ne $lu.Reseaux)         { $global:VazyFake.Reseaux         = $lu.Reseaux }
+        if ($null -ne $lu.ProchainSegment) { $global:VazyFake.ProchainSegment = $lu.ProchainSegment }
         $global:VazyFake.Systeme         = $lu.Systeme
         $global:VazyFake.OutilsRepondent = $lu.OutilsRepondent
         $global:VazyFake.CodeScript      = $lu.CodeScript
@@ -518,6 +524,44 @@ function Get-MachineDisqueGo {
     Write-AppelFake 'Get-MachineDisqueGo' @{ Machine = $Machine }
     if ($global:VazyFake.Modeles.ContainsKey($Machine)) { return [double]$global:VazyFake.Modeles[$Machine].DisqueGo }
     return 0.0
+}
+
+# ----------------------------------------------------------------------------
+#  Contrat : segments réseau personnalisés
+# ----------------------------------------------------------------------------
+
+function Get-ReseauxNommes {
+    Write-AppelFake 'Get-ReseauxNommes'
+    $reseaux = @()
+    foreach ($id in @($global:VazyFake.Reseaux.Keys)) {
+        $r = $global:VazyFake.Reseaux[$id]
+        $reseaux += @{ Identifiant = $id; Adresse = $r.Adresse; Masque = $r.Masque; Dhcp = $r.Dhcp }
+    }
+    return $reseaux
+}
+
+function New-ReseauNomme {
+    param(
+        [string]$Identifiant = '',
+        [string]$Adresse = '',
+        [string]$Masque = '255.255.255.0',
+        [bool]$Dhcp = $false
+    )
+    Write-AppelFake 'New-ReseauNomme' @{ Identifiant = $Identifiant; Adresse = $Adresse; Masque = $Masque; Dhcp = $Dhcp }
+    if (-not $Identifiant) {
+        $Identifiant = 'segment' + $global:VazyFake.ProchainSegment
+        $global:VazyFake.ProchainSegment++
+    }
+    $global:VazyFake.Reseaux[$Identifiant] = @{ Adresse = $Adresse; Masque = $Masque; Dhcp = $Dhcp }
+    Save-EtatFake
+    return $Identifiant
+}
+
+function Remove-ReseauNomme {
+    param([Parameter(Mandatory = $true)][string]$Identifiant)
+    Write-AppelFake 'Remove-ReseauNomme' @{ Identifiant = $Identifiant }
+    $global:VazyFake.Reseaux.Remove($Identifiant)
+    Save-EtatFake
 }
 
 # État initial, pour que le simple chargement du pilote suffise ; puis reprise

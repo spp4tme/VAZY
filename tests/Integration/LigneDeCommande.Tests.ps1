@@ -164,6 +164,58 @@ Describe 'Integration - lecture d''un fichier de labo' {
     }
 }
 
+Describe 'Integration - segments reseau' {
+
+    BeforeEach { Initialize-BacASable }
+
+    It 'cree un segment, le liste, y branche une VM, puis refuse de le supprimer' {
+        $creation = Invoke-Vazy net add labo-dmz --adresse 192.168.100.0
+        $creation.Code | Should Be 0
+
+        $liste = Invoke-Vazy net list
+        $liste.Code | Should Be 0
+        $liste.Sortie | Should Match 'labo-dmz'
+
+        $vm = Invoke-Vazy ubuntu --name poste1 --reseau-nomme labo-dmz --nostart
+        $vm.Code | Should Be 0
+
+        # Une VM y est branchee : le segment ne doit pas partir en silence.
+        $suppression = Invoke-Vazy net rm labo-dmz --yes
+        $suppression.Code | Should Not Be 0
+        $suppression.Sortie | Should Match 'poste1'
+    }
+
+    It 'supprime un segment libre' {
+        Invoke-Vazy net add labo-dmz | Out-Null
+        $r = Invoke-Vazy net rm labo-dmz --yes
+        $r.Code | Should Be 0
+
+        # On verifie que la liste est vide, et non l'absence du nom : le
+        # message affiche quand il n'y a rien cite « labo-dmz » en exemple.
+        $liste = Invoke-Vazy net list
+        $liste.Sortie | Should Match 'Aucun segment'
+    }
+
+    It 'refuse une VM sur un segment jamais cree' {
+        $r = Invoke-Vazy ubuntu --name poste1 --reseau-nomme inexistant --nostart
+        $r.Code | Should Not Be 0
+        $r.Sortie | Should Match 'inexistant'
+    }
+
+    It 'accepte reseau-nomme dans un fichier de labo' {
+        Invoke-Vazy net add labo-dmz | Out-Null
+        $chemin = Join-Path (Get-RacineTest) 'tpnet.json'
+        $contenu = '{ "labo": "tpnet", "delai": 0, "machines": { "srv": { "modele": "ubuntu", "mode": "nat", "reseau-nomme": "labo-dmz" } } }'
+        [System.IO.File]::WriteAllText($chemin, $contenu, (New-Object System.Text.UTF8Encoding($false)))
+
+        $up = Invoke-Vazy lab up $chemin
+        $up.Code | Should Be 0
+
+        $liste = Invoke-Vazy list
+        $liste.Sortie | Should Match 'tpnet-srv'
+    }
+}
+
 Describe 'Integration - diagnostic' {
 
     BeforeEach { Initialize-BacASable }

@@ -353,7 +353,51 @@ Avec `--mode nat --mode hostonly`, la première carte est en NAT et la seconde e
 
 **Piège PowerShell.** La forme `--mode "nat,hostonly"` fonctionne, mais les guillemets sont obligatoires, sinon PowerShell découpe sur la virgule et vazy reçoit deux arguments séparés. Même chose pour la mémoire : écrivez `--ram 1.5` avec un point, ou `--ram "1,5"` avec des guillemets.
 
-Toutes les machines en `hostonly` partagent le même segment. Deux labos montés en même temps en host-only se voient donc mutuellement. Les segments personnalisés VMnet2 et suivants sont [hors périmètre](#17-limites-connues).
+Toutes les machines en `hostonly` partagent le même segment : deux labos montés en même temps en host-only se voient mutuellement. Pour un réseau réellement isolé, voir les [segments personnalisés](#54-segments-réseau-isolés).
+
+### 5.4 Segments réseau isolés
+
+`hostonly` met **toutes** vos VM sur le même réseau. Dès qu'un TP demande deux réseaux distincts — un routeur entre une DMZ et un LAN, une machine coupée du reste — il faut un segment personnalisé.
+
+```
+vazy net add labo-dmz --adresse 192.168.100.0
+vazy net add labo-lan --adresse 192.168.200.0
+```
+
+Puis on y branche les VM :
+
+```
+vazy debian --name routeur --reseau-nomme labo-dmz --reseau-nomme labo-lan
+vazy debian --name web     --reseau-nomme labo-dmz
+vazy debian --name poste   --reseau-nomme labo-lan
+```
+
+Le routeur a deux cartes, une par segment ; `web` et `poste` ne se voient pas directement. `--reseau-nomme` se combine avec `--mode` — les cartes de `--mode` d'abord, celles des segments ensuite :
+
+```
+vazy debian --mode nat --reseau-nomme labo-dmz
+```
+
+Dans un fichier de labo, la clé s'appelle `reseau-nomme` et accepte un nom ou une liste :
+
+```json
+"routeur": { "modele": "debian", "reseau-nomme": ["labo-dmz", "labo-lan"] },
+"web":     { "modele": "debian", "mode": "nat", "reseau-nomme": "labo-dmz" }
+```
+
+Les commandes :
+
+| Commande | Effet |
+|---|---|
+| `vazy net list` | Segments déclarés, leur état réel, et les VM branchées dessus |
+| `vazy net add <nom> [--adresse a.b.c.0] [--dhcp]` | Crée un segment |
+| `vazy net rm <nom> [--yes]` | Le supprime — refusé si des VM y sont encore branchées |
+
+**Droits administrateur.** Sous VMware, créer ou supprimer un segment passe par `vnetlib`, qui exige une invite de commandes administrateur. Tout le reste de vazy fonctionne sans. Sous VirtualBox, aucun droit particulier : voir [docs/PILOTE-VIRTUALBOX.md](docs/PILOTE-VIRTUALBOX.md).
+
+**Adresse et DHCP.** `--adresse` fixe le réseau du segment, `--dhcp` y ajoute un serveur d'adresses. Sans l'un ni l'autre, le segment est un simple câble : à vous d'adresser les machines depuis l'intérieur, ce qui est souvent le but en TP de réseau.
+
+vazy vérifie avant chaque création de VM que le segment demandé existe toujours. Un segment supprimé à la main dans le Virtual Network Editor est signalé au lieu de donner une VM branchée dans le vide.
 
 ### 5.3 Ce que vous voyez
 
@@ -1072,7 +1116,7 @@ VMware peut laisser un dossier incomplet. Supprimez-le à la main, puis relancez
 Ce qui est volontairement hors périmètre :
 
 - **Redimensionner le disque.** Compliqué sur un clone lié, et inutile si le modèle a été créé avec un disque dynamique très large, comme recommandé à la [section 4.1](#41-créer-la-vm-dans-vmware-workstation).
-- **Réseaux personnalisés VMnet2 et suivants.** Ils se créent dans le Virtual Network Editor avec les droits administrateur. vazy ne les gère pas : `mode` ne connaît que `nat`, `bridged` et `hostonly`. Une fois un segment créé à la main, `--set ethernet0.connectionType=custom --set ethernet0.vnet=VMnet2` permet de s'y brancher, sans aucune vérification. **À savoir avant un TP de routage** : toutes les machines en `hostonly` partagent le même segment, et deux labos montés en même temps se voient.
+- **Adressage fin d'un segment.** `vazy net add` pose l'adresse du réseau et, en option, un serveur DHCP. Le reste — plage DHCP, passerelle, routes — se règle dans le Virtual Network Editor. Voir les [segments réseau isolés](#54-segments-réseau-isolés) pour ce qui est couvert.
 - **Autres hyperviseurs.** Seul VMware Workstation est pris en charge. L'architecture est prête pour VirtualBox et Hyper-V, voir la [section 18](#18-architecture).
 - **Interface graphique.** Aucune, et ce n'est pas prévu.
 - **Identité complète de l'invité.** Le nom d'hôte est appliqué, et un modèle guestinfo régénère les clés SSH du serveur et l'identifiant machine. Restent identiques d'un clone à l'autre : le SID Windows, qui demande `sysprep`, et la configuration IP, qui reste en DHCP.
@@ -1191,7 +1235,7 @@ une ligne.
 
 ## 20. Contribuer, tester, réutiliser
 
-- **Tests** : `Invoke-Pester -Path .\tests` — 66 tests qui tournent sans VMware
+- **Tests** : `Invoke-Pester -Path .\tests` — 104 tests qui tournent sans VMware
   installé. Comment c'est possible : [tests/README.md](tests/README.md).
 - **Contribuer** : [CONTRIBUTING.md](CONTRIBUTING.md) — la règle des trois
   couches, où va quoi, et ce qu'on vérifie avant de proposer un changement.

@@ -397,6 +397,12 @@ function Set-MachineReseau {
     $index = 0
     foreach ($mode in $Modes) {
         $index++
+        # « nomme:<identifiant> » désigne un segment personnalisé : chez
+        # VirtualBox, un réseau interne, désigné par son seul nom.
+        if ($mode -match '^(?i)nomme:(.+)$') {
+            $arguments += @("--nic$index", 'intnet', "--intnet$index", $Matches[1])
+            continue
+        }
         switch ($mode.ToLower()) {
             'nat' { $arguments += @("--nic$index", 'nat') }
             'bridged' {
@@ -802,6 +808,61 @@ function Get-MachineDisqueGo {
         }
     }
     return [math]::Round($total / 1GB, 1)
+}
+
+# ============================================================================
+#  Segments réseau personnalisés
+# ============================================================================
+#  Chez VirtualBox ce sont les « réseaux internes » (intnet), et c'est
+#  beaucoup plus simple que chez VMware : un réseau interne n'existe que par
+#  son nom. Il apparaît dès qu'une machine s'y rattache et disparaît quand
+#  plus personne ne l'utilise. Rien à créer, rien à supprimer, et surtout
+#  aucun droit d'administrateur — là où vnetlib les exige.
+#
+#  New-ReseauNomme et Remove-ReseauNomme n'ont donc presque rien à faire ; ce
+#  n'est pas un oubli, c'est la nature du mécanisme.
+# ============================================================================
+
+function Get-ReseauxNommes {
+    $r = Invoke-VBoxManage @('list', 'intnets') -Lecture
+    $reseaux = @()
+    if ($r.Code -ne 0) { return $reseaux }
+    foreach ($l in $r.Lignes) {
+        if ($l -match '^Name:\s+(.+?)\s*$') {
+            # Un réseau interne ne porte ni adresse ni masque : c'est un
+            # segment de niveau 2, l'adressage est l'affaire des invités.
+            $reseaux += @{ Identifiant = $Matches[1]; Adresse = ''; Masque = ''; Dhcp = $false }
+        }
+    }
+    return $reseaux
+}
+
+function New-ReseauNomme {
+    param(
+        [string]$Identifiant = '',
+        [string]$Adresse = '',
+        [string]$Masque = '255.255.255.0',
+        [bool]$Dhcp = $false
+    )
+    if (-not $Identifiant) {
+        # Aucun numéro à allouer : on fabrique un nom qui ne risque pas de
+        # heurter un réseau interne existant.
+        $Identifiant = 'vazy-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    }
+    if ($Adresse) {
+        & $script:Observateur 'journal' "segment $Identifiant : l'adresse $Adresse est ignorée, un réseau interne VirtualBox n'a pas d'adressage propre (voir docs\PILOTE-VIRTUALBOX.md)"
+    }
+    if ($Dhcp) {
+        & $script:Observateur 'journal' "segment $Identifiant : aucun serveur DHCP n'est fourni sur un réseau interne VirtualBox"
+    }
+    return $Identifiant
+}
+
+function Remove-ReseauNomme {
+    param([Parameter(Mandatory = $true)][string]$Identifiant)
+    # Un réseau interne disparaît de lui-même dès que plus aucune machine ne
+    # s'y rattache. Rien à faire, et rien à signaler comme une erreur.
+    & $script:Observateur 'journal' "segment $Identifiant : rien à supprimer, un réseau interne VirtualBox disparaît quand plus personne ne l'utilise"
 }
 
 # Capacité déclarée d'un disque, en octets (0 si illisible).

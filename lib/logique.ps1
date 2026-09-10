@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:NomOutil       = 'vazy'
 $script:VersionOutil   = '1.8.0'
-$script:VersionCatalogue = 8          # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionCatalogue = 9          # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -37,7 +37,7 @@ $script:RappelHyperVFait = $false   # le rappel court Hyper-V a-t-il déjà ét�
 $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins courts (chargée à la demande)
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
-                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc')
+                           'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -247,6 +247,10 @@ function Save-Config {
 #                 prérequis d'un labo partagé : « vazy template alias »)
 #   version 8 : + vms.<nom>.vnc { actif, port, motDePasse } : affichage distant
 #                 de l'écran de la VM (voir la section « écran à distance »)
+#   version 9 : + reseaux : segments réseau personnalisés, nom parlant ->
+#                 { identifiant rendu par le pilote, adresse, dhcp, creeLe }.
+#                 Une carte branchée sur un segment apparaît dans
+#                 vms.<nom>.reseau sous la forme « nomme:<identifiant> ».
 #   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
 #   migration destructive.
 function Read-Catalogue {
@@ -255,9 +259,11 @@ function Read-Catalogue {
     $c['version'] = $script:VersionCatalogue
     $c['modeles'] = New-Dictionnaire
     $c['vms']     = New-Dictionnaire
+    $c['reseaux'] = New-Dictionnaire
     if ($null -eq $lu) { return $c }
     if ($lu.Contains('modeles') -and $lu['modeles'] -is [System.Collections.IDictionary]) { $c['modeles'] = $lu['modeles'] }
     if ($lu.Contains('vms')     -and $lu['vms']     -is [System.Collections.IDictionary]) { $c['vms']     = $lu['vms'] }
+    if ($lu.Contains('reseaux') -and $lu['reseaux'] -is [System.Collections.IDictionary]) { $c['reseaux'] = $lu['reseaux'] }
 
     $versionLue = if ($lu.Contains('version')) { [int]$lu['version'] } else { 1 }
     $modifie = ($versionLue -lt $script:VersionCatalogue)
@@ -636,6 +642,7 @@ function New-VmDepuisModele {
             ("Un clone lié doit s'appuyer sur un instantané. " + ($script:Pilote.ConseilInstantane -f $script:Pilote.Executable, $infosModele['chemin']) + "`nPuis ré-enregistrez le modèle : vazy template rm $Modele ; vazy template add ""$($infosModele['chemin'])"" --name $Modele"))
     }
 
+    Test-ReseauxDemandes -Modes $Modes
     $dossierRacine = Get-DossierVms -Modele $infosModele
     if ($Nom) {
         Test-NomValide -Nom $Nom
@@ -1392,10 +1399,28 @@ function Export-Labo {
         $court = $vm.Nom
         if ($prefixeReel -and $court -ilike ($prefixeReel + '-*')) { $court = $court.Substring($prefixeReel.Length + 1) }
         $entree = [ordered]@{ modele = $vm.Modele; ram = $vm.RamGo; cpu = $vm.Cpu }
-        $modes = @($vm.Reseau)
-        if ($modes.Count -eq 0) { $entree['reseau'] = 0 }
+        # Les segments personnalisés sont stockés sous l'identifiant du pilote
+        # (« nomme:vmnet2ptr ») : on les réécrit sous leur nom parlant, sinon le
+        # fichier exporté ne serait relisible que sur cette machine-ci.
+        $modes = @()
+        $segments = @()
+        foreach ($m in @($vm.Reseau)) {
+            if ([string]$m -match '^(?i)nomme:(.+)$') {
+                $identifiant = $Matches[1]
+                $parlant = Get-NomReseauParIdentifiant -Identifiant $identifiant
+                if (-not $parlant) {
+                    Publish-Message 'attention' ("la VM « {0} » utilise le segment {1}, inconnu du catalogue de vazy : il est exporté tel quel et devra être recréé à la main." -f $vm.Nom, $identifiant)
+                    $parlant = $identifiant
+                }
+                $segments += $parlant
+            } else { $modes += [string]$m }
+        }
+        $total = $modes.Count + $segments.Count
+        if ($total -eq 0) { $entree['reseau'] = 0 }
         elseif ($modes.Count -eq 1) { $entree['mode'] = $modes[0] }
-        else { $entree['mode'] = $modes }
+        elseif ($modes.Count -gt 1) { $entree['mode'] = $modes }
+        if ($segments.Count -eq 1) { $entree['reseau-nomme'] = $segments[0] }
+        elseif ($segments.Count -gt 1) { $entree['reseau-nomme'] = $segments }
         if ($vm.NomHote -and $vm.NomHote -ine $court) { $entree['hostname'] = $vm.NomHote }
         elseif (-not $vm.NomHote) { $entree['hostname'] = $false }
         if ($vm.VncActif) { $entree['vnc'] = $true }
@@ -2479,6 +2504,181 @@ function Set-AliasModele {
 # ----------------------------------------------------------------------------
 #  Configuration
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+#  Segments réseau personnalisés
+#  « hostonly » met TOUTES les VM sur le même segment : deux labos montés en
+#  même temps se voient mutuellement, et on ne peut pas faire de TP de routage
+#  ou de segmentation sérieux. Un segment nommé est un réseau isolé auquel on
+#  rattache les machines de son choix.
+#
+#  vazy tient la correspondance entre un nom parlant (« labo-dmz ») et
+#  l'identifiant que le pilote lui a rendu. Cet identifiant est opaque pour
+#  cette couche : elle le transporte, elle ne l'interprète jamais.
+# ----------------------------------------------------------------------------
+
+# Fiche d'un segment, ou $null. Le nom est insensible à la casse.
+function Get-ReseauDuCatalogue {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    foreach ($k in @($script:Catalogue['reseaux'].Keys)) {
+        if ($k -ieq $Nom) { return $script:Catalogue['reseaux'][$k] }
+    }
+    return $null
+}
+
+# Nom parlant d'un segment à partir de l'identifiant du pilote, ou '' si vazy
+# ne le connaît pas (segment créé à la main dans l'hyperviseur).
+function Get-NomReseauParIdentifiant {
+    param([Parameter(Mandatory = $true)][string]$Identifiant)
+    foreach ($k in @($script:Catalogue['reseaux'].Keys)) {
+        if ([string]$script:Catalogue['reseaux'][$k]['identifiant'] -ieq $Identifiant) { return $k }
+    }
+    return ''
+}
+
+# Noms des VM rattachées à un segment, d'après leur fiche au catalogue.
+function Get-VmsSurReseau {
+    param([Parameter(Mandatory = $true)][string]$Identifiant)
+    $noms = @()
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        $modes = @($script:Catalogue['vms'][$nom]['reseau'])
+        foreach ($m in $modes) {
+            if ([string]$m -ieq ('nomme:' + $Identifiant)) { $noms += $nom; break }
+        }
+    }
+    return $noms
+}
+
+# Traduit un nom parlant en mode réseau utilisable par le pilote.
+# Vérifie au passage que le segment existe toujours côté hyperviseur : un
+# segment supprimé à la main dans l'éditeur de réseaux virtuels ne doit pas
+# donner une VM branchée dans le vide.
+function Resolve-ReseauNomme {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    $fiche = Get-ReseauDuCatalogue -Nom $Nom
+    if ($null -eq $fiche) {
+        $connus = @($script:Catalogue['reseaux'].Keys)
+        $conseil = if ($connus.Count -gt 0) {
+            'Segments connus : ' + ($connus -join ', ') + ". Pour en créer un : vazy net add $Nom"
+        } else {
+            "Aucun segment n'est déclaré. Créez-le : vazy net add $Nom"
+        }
+        throw (New-ErreurOutil "Le segment réseau « $Nom » n'existe pas." $conseil)
+    }
+    $identifiant = [string]$fiche['identifiant']
+    Connect-Pilote | Out-Null
+    $existants = @(Get-ReseauxNommes | ForEach-Object { $_.Identifiant })
+    if ($existants -notcontains $identifiant) {
+        throw (New-ErreurOutil "Le segment « $Nom » est au catalogue de vazy, mais l'hyperviseur ne le connaît plus (identifiant $identifiant)." `
+            ("Il a probablement été supprimé en dehors de vazy.`n" +
+             "Recréez-le : vazy net rm $Nom puis vazy net add $Nom`n" +
+             "Pour l'état général : vazy doctor"))
+    }
+    return ('nomme:' + $identifiant)
+}
+
+# Garde-fou avant de créer ou de démarrer : chaque segment nommé demandé
+# existe-t-il encore ? Sans lui, la VM démarrerait branchée dans le vide, ce
+# qui est bien plus long à diagnostiquer qu'un refus immédiat.
+function Test-ReseauxDemandes {
+    param([string[]]$Modes)
+    $nommes = @($Modes | Where-Object { [string]$_ -match '^(?i)nomme:' })
+    if ($nommes.Count -eq 0) { return }
+    $existants = @(Get-ReseauxNommes | ForEach-Object { [string]$_.Identifiant })
+    foreach ($m in $nommes) {
+        $identifiant = ([string]$m) -replace '^(?i)nomme:', ''
+        if ($existants -notcontains $identifiant) {
+            $connu = @($script:Catalogue['reseaux'].Keys | Where-Object { [string]$script:Catalogue['reseaux'][$_]['identifiant'] -ieq $identifiant })
+            $quel = if ($connu.Count -gt 0) { "« $($connu[0]) » (identifiant $identifiant)" } else { "d'identifiant $identifiant" }
+            throw (New-ErreurOutil "Le segment réseau $quel n'existe plus côté hyperviseur." `
+                ("Il a été supprimé en dehors de vazy. Voyez l'état : vazy net list`n" +
+                 'Recréez-le, ou demandez un autre réseau (--mode, --reseau-nomme).'))
+        }
+    }
+}
+
+# Tous les segments déclarés, avec leur état réel et leurs VM.
+function Get-ListeReseaux {
+    Connect-Pilote | Out-Null
+    $existants = @{}
+    foreach ($r in @(Get-ReseauxNommes)) { $existants[[string]$r.Identifiant] = $r }
+    $liste = @()
+    foreach ($nom in @($script:Catalogue['reseaux'].Keys)) {
+        $fiche = $script:Catalogue['reseaux'][$nom]
+        $identifiant = [string]$fiche['identifiant']
+        $present = $existants.ContainsKey($identifiant)
+        $liste += [pscustomobject]@{
+            Nom         = $nom
+            Identifiant = $identifiant
+            Adresse     = [string]$fiche['adresse']
+            Dhcp        = [bool]$fiche['dhcp']
+            Etat        = $(if ($present) { 'actif' } else { 'absent de l''hyperviseur' })
+            Vms         = @(Get-VmsSurReseau -Identifiant $identifiant)
+            CreeLe      = [string]$fiche['creeLe']
+        }
+    }
+    return $liste
+}
+
+# Crée un segment et l'enregistre sous un nom parlant.
+function New-ReseauLabo {
+    param(
+        [Parameter(Mandatory = $true)][string]$Nom,
+        [string]$Adresse = '',
+        [switch]$Dhcp
+    )
+    Connect-Pilote | Out-Null
+    Test-NomValide -Nom $Nom -Role 'nom de segment réseau'
+    if ($null -ne (Get-ReseauDuCatalogue -Nom $Nom)) {
+        throw (New-ErreurOutil "Le segment « $Nom » existe déjà." "Voyez-le avec vazy net list, ou supprimez-le d'abord : vazy net rm $Nom")
+    }
+    if (Test-NomPris $Nom) {
+        throw (New-ErreurOutil "« $Nom » est déjà le nom d'une VM ou d'un modèle." 'Choisissez un autre nom : il sert à désigner le segment dans --reseau-nomme et dans les fichiers de labo.')
+    }
+    if ($Adresse -and $Adresse -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        throw (New-ErreurOutil "Adresse de segment invalide : $Adresse" 'Indiquez une adresse de réseau, par exemple 192.168.100.0.')
+    }
+
+    $identifiant = New-ReseauNomme -Adresse $Adresse -Dhcp ([bool]$Dhcp)
+    $fiche = New-Dictionnaire
+    $fiche['identifiant'] = $identifiant
+    $fiche['adresse']     = $Adresse
+    $fiche['dhcp']        = [bool]$Dhcp
+    $fiche['creeLe']      = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss')
+    $script:Catalogue['reseaux'][$Nom] = $fiche
+    Save-Catalogue
+    Publish-Message 'ok' ("Segment « {0} » créé ({1}){2}." -f $Nom, $identifiant, $(if ($Adresse) { ", réseau $Adresse" } else { '' }))
+    return [pscustomobject]@{ Nom = $Nom; Identifiant = $identifiant; Adresse = $Adresse; Dhcp = [bool]$Dhcp }
+}
+
+# Supprime un segment. Refuse tant qu'une VM du catalogue y est rattachée :
+# la débrancher sans prévenir laisserait une VM muette au prochain démarrage.
+function Remove-ReseauLabo {
+    param([Parameter(Mandatory = $true)][string]$Nom)
+    Connect-Pilote | Out-Null
+    $fiche = Get-ReseauDuCatalogue -Nom $Nom
+    if ($null -eq $fiche) {
+        throw (New-ErreurOutil "Le segment « $Nom » n'existe pas." 'Voyez les segments déclarés : vazy net list')
+    }
+    $identifiant = [string]$fiche['identifiant']
+    $utilisatrices = @(Get-VmsSurReseau -Identifiant $identifiant)
+    if ($utilisatrices.Count -gt 0) {
+        throw (New-ErreurOutil ("{0} VM sont encore branchées sur le segment « {1} » : {2}" -f $utilisatrices.Count, $Nom, ($utilisatrices -join ', ')) `
+            ("Supprimez ces VM, ou rebranchez-les ailleurs, avant de retirer le segment.`n" +
+             'Sans cela elles démarreraient sur un réseau inexistant.'))
+    }
+    try { Remove-ReseauNomme -Identifiant $identifiant }
+    catch {
+        # L'hyperviseur refuse ou ne connaît plus le segment : la fiche part
+        # quand même, sinon elle resterait coincée au catalogue pour toujours.
+        Publish-Message 'attention' ("le segment {0} n'a pas pu être retiré de l'hyperviseur ({1}). Sa fiche est retirée du catalogue ; vérifiez l'éditeur de réseaux virtuels." -f $identifiant, $_.Exception.Message)
+    }
+    foreach ($k in @($script:Catalogue['reseaux'].Keys)) {
+        if ($k -ieq $Nom) { $script:Catalogue['reseaux'].Remove($k); break }
+    }
+    Save-Catalogue
+    Publish-Message 'ok' "Segment « $Nom » supprimé."
+}
 
 function Get-ConfigAffichable {
     return [ordered]@{

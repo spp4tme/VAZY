@@ -21,9 +21,18 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 - Test de conformité des pilotes : le contrat est extrait des faits et exigé de
   chaque pilote, et l'absence de terme propre à un hyperviseur dans les couches
   1 et 2 est vérifiée par analyse syntaxique.
+- **Segments réseau isolés.** `vazy net add|list|rm`, option `--reseau-nomme`
+  répétable, et clé `reseau-nomme` dans les fichiers de labo. Là où `hostonly`
+  met toutes les VM sur le même réseau, un segment ne relie que celles qu'on y
+  branche : de quoi monter un TP de routage ou de segmentation.
+  Trois fonctions ajoutées au contrat du pilote : `Get-ReseauxNommes`,
+  `New-ReseauNomme`, `Remove-ReseauNomme`.
 
 ### Corrigé
 
+- `lab export` réécrit les segments sous leur nom parlant et non sous
+  l'identifiant du pilote : un labo exporté redevient relisible sur une autre
+  machine.
 - Un montage de labo interrompu ne laisse plus de VM à moitié créées. Si la
   création d'une machine échoue, celles que **ce montage** venait de créer sont
   supprimées ; les VM du labo antérieures à la commande sont conservées.

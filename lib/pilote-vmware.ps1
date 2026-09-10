@@ -496,12 +496,19 @@ function Set-MachineReseau {
     $typeCarte = Get-ValeurVmx -Vmx $vmx -Cle 'ethernet0.virtualDev'
     Remove-ClesVmx -Vmx $vmx -MotifCle 'ethernet\d+\..*'
     for ($i = 0; $i -lt $Modes.Count; $i++) {
-        $mode = $correspondance[$Modes[$i].ToLower()]
+        # « nomme:<identifiant> » désigne un segment personnalisé. L'identifiant
+        # est celui que ce pilote a lui-même renvoyé (New-ReseauNomme) : la
+        # logique le transporte sans jamais l'interpréter.
+        $demande = [string]$Modes[$i]
+        $segment = $null
+        if ($demande -match '^(?i)nomme:(.+)$') { $segment = $Matches[1] }
+        $mode = if ($segment) { 'custom' } else { $correspondance[$demande.ToLower()] }
         if (-not $mode) {
-            throw (New-ErreurPilote "Mode réseau inconnu pour le pilote VMware : $($Modes[$i])" "Modes acceptés : nat, bridged, hostonly.")
+            throw (New-ErreurPilote "Mode réseau inconnu pour le pilote VMware : $demande" "Modes acceptés : nat, bridged, hostonly, ou un segment personnalisé (vazy net list).")
         }
         Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).present" -Valeur 'TRUE'
         Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).connectionType" -Valeur $mode
+        if ($segment) { Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).vnet" -Valeur $segment }
         Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).addressType" -Valeur 'generated'   # adresse MAC régénérée au premier démarrage
         Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).startConnected" -Valeur 'TRUE'
         if ($typeCarte) { Set-ValeurVmx -Vmx $vmx -Cle "ethernet$($i).virtualDev" -Valeur $typeCarte }
@@ -880,5 +887,150 @@ function Remove-MachineInstantane {
     if ($r.Code -ne 0) {
         throw (New-ErreurPilote "La suppression de l'instantané « $Nom » a échoué : $(Get-MessageVmrun $r)" `
             "Vérifiez qu'il existe (vazy snaps <nom>) et qu'aucune opération n'est en cours dans VMware Workstation.")
+    }
+}
+
+# ============================================================================
+#  Segments réseau personnalisés
+# ============================================================================
+#  Un segment est un réseau isolé auquel on rattache plusieurs VM : c'est ce
+#  qu'il faut pour un TP de routage ou de segmentation, où « hostonly » ne
+#  suffit pas (toutes les machines en hostonly partagent le même segment).
+#
+#  Chez VMware ce sont les VMnet. VMnet0 (bridged), VMnet1 (host-only) et
+#  VMnet8 (NAT) sont réservés ; les autres sont libres.
+#
+#  Les LECTURES passent par le registre : fiables, et sans droits
+#  d'administrateur. Les ÉCRITURES passent par vnetlib, qui exige ces droits.
+# ============================================================================
+
+$script:CleVmnet = 'HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMnetLib\VMnetConfig'
+$script:VmnetReserves = @('vmnet0', 'vmnet1', 'vmnet8')
+
+function Find-Vnetlib {
+    $dossier = if ($script:VmrunExe) { Split-Path -Parent $script:VmrunExe } else { $null }
+    foreach ($nom in @('vnetlib64.exe', 'vnetlib.exe')) {
+        if ($dossier) {
+            $c = Join-Path $dossier $nom
+            if (Test-Path -LiteralPath $c -PathType Leaf) { return $c }
+        }
+    }
+    return $null
+}
+
+function Test-DroitsAdministrateur {
+    try {
+        $identite = [Security.Principal.WindowsIdentity]::GetCurrent()
+        return ([Security.Principal.WindowsPrincipal]$identite).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+# Toute commande vnetlib passe ici : même rôle qu'Invoke-Vmrun.
+function Invoke-Vnetlib {
+    param([string[]]$Arguments)
+    $exe = Find-Vnetlib
+    if (-not $exe) {
+        throw (New-ErreurPilote "vnetlib est introuvable à côté de vmrun.exe." `
+            "Les segments réseau personnalisés demandent l'outil réseau de VMware Workstation. Vérifiez votre installation, ou créez le segment à la main dans Edit > Virtual Network Editor.")
+    }
+    if (-not (Test-DroitsAdministrateur)) {
+        throw (New-ErreurPilote "La modification des réseaux virtuels demande les droits d'administrateur." `
+            "Ouvrez une invite de commandes en tant qu'administrateur et relancez la commande. Seule la création et la suppression de segments l'exigent : le reste de vazy fonctionne sans.")
+    }
+    $affichable = ConvertTo-LigneCommande (@($exe) + $Arguments)
+    if ($script:Simulation) {
+        & $script:Observateur 'simulation' $affichable
+        return @{ Code = 0; Lignes = @(); Sortie = '' }
+    }
+    & $script:Observateur 'journal' $affichable
+    $lignes = & $exe @Arguments 2>&1 | ForEach-Object { [string]$_ }
+    return @{ Code = $LASTEXITCODE; Lignes = @($lignes); Sortie = ($lignes -join "`n") }
+}
+
+# Segments existants, lus dans le registre. Les réservés sont exclus : ce sont
+# les modes nat/bridged/hostonly, pas des segments à gérer.
+function Get-ReseauxNommes {
+    $reseaux = @()
+    if (-not (Test-Path -LiteralPath $script:CleVmnet)) { return $reseaux }
+    foreach ($cle in @(Get-ChildItem -LiteralPath $script:CleVmnet -ErrorAction SilentlyContinue)) {
+        $nom = $cle.PSChildName.ToLower()
+        if ($nom -notmatch '^vmnet\d+$') { continue }
+        if ($script:VmnetReserves -contains $nom) { continue }
+        $valeurs = Get-ItemProperty -LiteralPath $cle.PSPath -ErrorAction SilentlyContinue
+        $adresse = ''
+        $masque  = ''
+        $dhcp    = $false
+        if ($valeurs) {
+            if ($valeurs.PSObject.Properties['IPSubnetAddr']) { $adresse = [string]$valeurs.IPSubnetAddr }
+            if ($valeurs.PSObject.Properties['IPSubnetMask']) { $masque  = [string]$valeurs.IPSubnetMask }
+            if ($valeurs.PSObject.Properties['UseDHCP'])      { $dhcp    = ([int]$valeurs.UseDHCP -ne 0) }
+        }
+        $reseaux += @{ Identifiant = $nom; Adresse = $adresse; Masque = $masque; Dhcp = $dhcp }
+    }
+    return $reseaux
+}
+
+# Premier VMnet libre, hors réservés.
+function Get-VmnetLibre {
+    $pris = @(Get-ReseauxNommes | ForEach-Object { $_.Identifiant })
+    for ($i = 2; $i -le 19; $i++) {
+        $candidat = 'vmnet' + $i
+        if ($script:VmnetReserves -contains $candidat) { continue }
+        if ($pris -notcontains $candidat) { return $candidat }
+    }
+    return $null
+}
+
+function New-ReseauNomme {
+    param(
+        [string]$Identifiant = '',
+        [string]$Adresse = '',
+        [string]$Masque = '255.255.255.0',
+        [bool]$Dhcp = $false
+    )
+    if (-not $Identifiant) {
+        $Identifiant = Get-VmnetLibre
+        if (-not $Identifiant) {
+            throw (New-ErreurPilote "Plus aucun segment réseau disponible : VMnet2 à VMnet19 sont tous pris." `
+                "Libérez-en un (vazy net rm <nom>), ou supprimez un réseau inutilisé dans Edit > Virtual Network Editor.")
+        }
+    }
+    if ($script:VmnetReserves -contains $Identifiant.ToLower()) {
+        throw (New-ErreurPilote "« $Identifiant » est un réseau réservé de VMware (bridged, host-only ou NAT)." `
+            "Ces trois-là s'utilisent par --mode bridged, hostonly ou nat, pas comme segment personnalisé.")
+    }
+
+    $r = Invoke-Vnetlib @('--', 'add', 'vnet', $Identifiant)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La création du segment $Identifiant a échoué : $($r.Sortie)" `
+            "Vérifiez dans Edit > Virtual Network Editor qu'il n'existe pas déjà, et que VMware Workstation n'est pas en train de démarrer une VM.")
+    }
+    if ($Adresse) {
+        Invoke-Vnetlib @('--', 'set', 'vnet', $Identifiant, 'addr', $Adresse) | Out-Null
+        Invoke-Vnetlib @('--', 'set', 'vnet', $Identifiant, 'mask', $Masque)  | Out-Null
+    }
+    Invoke-Vnetlib @('--', 'add', 'adapter', $Identifiant) | Out-Null
+    if ($Dhcp) {
+        Invoke-Vnetlib @('--', 'add', 'dhcp', $Identifiant)    | Out-Null
+        Invoke-Vnetlib @('--', 'update', 'dhcp', $Identifiant) | Out-Null
+    }
+    Invoke-Vnetlib @('--', 'update', 'adapter', $Identifiant) | Out-Null
+    return $Identifiant
+}
+
+function Remove-ReseauNomme {
+    param([Parameter(Mandatory = $true)][string]$Identifiant)
+    if ($script:VmnetReserves -contains $Identifiant.ToLower()) {
+        throw (New-ErreurPilote "« $Identifiant » est un réseau réservé de VMware : le supprimer casserait les modes nat, bridged ou hostonly." `
+            "vazy ne supprime que les segments qu'il a créés.")
+    }
+    # Le DHCP et la carte hôte d'abord : le segment ne peut pas partir tant
+    # qu'ils s'y rattachent. Leur absence n'est pas une erreur.
+    Invoke-Vnetlib @('--', 'remove', 'dhcp', $Identifiant)    | Out-Null
+    Invoke-Vnetlib @('--', 'remove', 'adapter', $Identifiant) | Out-Null
+    $r = Invoke-Vnetlib @('--', 'remove', 'vnet', $Identifiant)
+    if ($r.Code -ne 0) {
+        throw (New-ErreurPilote "La suppression du segment $Identifiant a échoué : $($r.Sortie)" `
+            "Vérifiez qu'aucune VM ne l'utilise encore, y compris hors de vazy, puis réessayez.")
     }
 }

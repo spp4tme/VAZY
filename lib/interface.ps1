@@ -118,6 +118,11 @@ USAGE
                                      arrête et supprime tout le labo (--stop-only : arrête sans supprimer)
   vazy lab export <fichier.json> --labo <nom> | --prefixe <p> | --vms a,b,c
                                      génère le fichier de labo qui recréerait des VM existantes
+  vazy net list                      segments réseau personnalisés déclarés, et leurs VM
+  vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
+                                     crée un segment isolé (droits administrateur requis
+                                     sous VMware)
+  vazy net rm <nom> [--yes]          supprime un segment (refusé si des VM y sont branchées)
   vazy vnc <nom> [off]               affiche le lien pour voir l'écran de la VM depuis un
                                      téléphone ou un autre poste (l'active si besoin)
   vazy doctor                        diagnostic : hyperviseur, disque, modèles, VM, cohérence
@@ -137,6 +142,12 @@ OPTIONS DE CRÉATION (toutes facultatives)
   --mode <m>         nat | bridged | hostonly     défaut : nat
                      un mode par carte, en répétant l'option : --mode nat --mode hostonly
                      (ou --mode "nat,hostonly" : les guillemets sont obligatoires sous PowerShell)
+  --reseau-nomme <s> branche une carte sur un segment isolé (vazy net list), répétable.
+                     Contrairement à hostonly, qui met TOUTES les VM sur le même réseau,
+                     un segment ne voit que les VM qu'on y branche : c'est ce qu'il faut
+                     pour un TP de routage ou de segmentation.
+                     Exemple : vazy debian --reseau-nomme labo-dmz
+                               vazy debian --mode nat --reseau-nomme labo-dmz   (2 cartes)
   --set <cle>=<val>  écrit une ligne brute dans la configuration de la VM, répétable ;
                      appliqué après les autres options, il peut donc les écraser
   --nogui            démarre sans fenêtre
@@ -192,15 +203,16 @@ function New-ErreurUsage {
 function ConvertFrom-Arguments {
     param([string[]]$Jetons)
     $optionsAvecValeur = @('name', 'ram', 'cpu', 'reseau', 'mode', 'set', 'snapshot', 'hostname', 'user', 'os',
-                           'labo', 'prefixe', 'vms', 'delai', 'vm')
+                           'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
-                           'dry-run', 'requis', 'tout', 'save')
+                           'dry-run', 'requis', 'tout', 'save', 'dhcp')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
         Options      = @{}
         Sets         = New-Object 'System.Collections.Generic.List[object]'
         Vms          = New-Object 'System.Collections.Generic.List[string]'   # --vm nom:modele:ram, répétable
+        Segments     = New-Object 'System.Collections.Generic.List[string]'   # --reseau-nomme <segment>, répétable
     }
     $i = 0
     while ($i -lt $Jetons.Count) {
@@ -239,6 +251,9 @@ function ConvertFrom-Arguments {
                     $resultat.Sets.Add((ConvertTo-ReglageBrut -Texte $valeur))
                 } elseif ($nom -eq 'vm') {
                     $resultat.Vms.Add($valeur)
+                } elseif ($nom -eq 'reseau-nomme') {
+                    # Répétable : une carte par segment demandé, dans l'ordre.
+                    $resultat.Segments.Add($valeur)
                 } elseif ($nom -eq 'mode' -and $resultat.Options.ContainsKey('mode')) {
                     # --mode répétable : un mode par carte, dans l'ordre (équivaut à --mode a,b)
                     $resultat.Options['mode'] = $resultat.Options['mode'] + ',' + $valeur
@@ -305,9 +320,16 @@ function ConvertTo-ListeModes {
     $modes = @()
     if ($null -ne $ModeTexte) {
         foreach ($m in ($ModeTexte -split ',')) {
-            $k = $m.Trim().ToLower()
+            $k = $m.Trim()
             if ($k -eq '') { continue }
-            if (-not $synonymes.ContainsKey($k)) { throw (New-ErreurUsage "Mode réseau inconnu : « $m ». Valeurs possibles : nat, bridged, hostonly.") }
+            # « @nom » désigne un segment personnalisé (--reseau-nomme écrit
+            # cette forme). Le nom reste celui de l'utilisateur à ce stade ;
+            # Resolve-ModesReseau le traduira en identifiant du pilote.
+            if ($k -match '^@(.+)$') { $modes += ('nomme:' + $Matches[1]); continue }
+            $k = $k.ToLower()
+            if (-not $synonymes.ContainsKey($k)) {
+                throw (New-ErreurUsage "Mode réseau inconnu : « $m ». Valeurs possibles : nat, bridged, hostonly, ou @<segment> pour un segment personnalisé (vazy net list).")
+            }
             $modes += $synonymes[$k]
         }
     }
@@ -322,6 +344,28 @@ function ConvertTo-ListeModes {
         $liste += $(if ($i -lt $modes.Count) { $modes[$i] } else { $modes[-1] })   # les cartes en plus reprennent le dernier mode
     }
     return , $liste
+}
+
+# Traduit les segments désignés par leur nom parlant en identifiants du
+# pilote. Fait en un seul endroit, juste avant de passer la main à la logique.
+function Resolve-ModesReseau {
+    param([string[]]$Modes)
+    $resolus = @()
+    foreach ($m in $Modes) {
+        if ([string]$m -match '^(?i)nomme:(.+)$') { $resolus += (Resolve-ReseauNomme -Nom $Matches[1]) }
+        else { $resolus += [string]$m }
+    }
+    return , $resolus
+}
+
+# Ajoute les segments de --reseau-nomme au texte des modes, sous la forme
+# « @nom » comprise par ConvertTo-ListeModes.
+function Add-ReseauxNommesAuxModes {
+    param($ModeTexte, [string[]]$Segments)
+    if (@($Segments).Count -eq 0) { return $ModeTexte }
+    $ajout = (@($Segments | ForEach-Object { '@' + $_ }) -join ',')
+    if ($null -eq $ModeTexte -or $ModeTexte -eq '') { return $ajout }
+    return ($ModeTexte + ',' + $ajout)
 }
 
 # Valeur d'une option à valeur facultative (--vnc / --vnc off) -> booléen.
@@ -415,7 +459,7 @@ function Read-FichierLabo {
         $e = New-ErreurOutil "Fichier $fichier : la clé « machines » manque ou n'est pas un objet { \"nom\": { ... }, ... }." $conseilFormat; $e.Data['CodeSortie'] = 2; throw $e
     }
 
-    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'set', 'nogui', 'nostart', 'apres', 'hostname', 'vnc')
+    $clesMachine = @('modele', 'ram', 'cpu', 'reseau', 'mode', 'reseau-nomme', 'set', 'nogui', 'nostart', 'apres', 'hostname', 'vnc')
     $machines = @()
     foreach ($p in $json.machines.PSObject.Properties) {
         $nomMachine = $p.Name
@@ -435,7 +479,14 @@ function Read-FichierLabo {
             $modeTexte = $null
             if ($def.PSObject.Properties['mode']) { $modeTexte = if ($def.mode -is [array]) { (@($def.mode | ForEach-Object { [string]$_ }) -join ',') } else { [string]$def.mode } }
             $reseauTexte = if ($def.PSObject.Properties['reseau']) { [string]$def.reseau } else { $null }
+            # « reseau-nomme » : un segment personnalisé, ou une liste.
+            $segments = @()
+            if ($def.PSObject.Properties['reseau-nomme'] -and $null -ne $def.'reseau-nomme') {
+                $segments = if ($def.'reseau-nomme' -is [array]) { @($def.'reseau-nomme' | ForEach-Object { [string]$_ }) } else { @([string]$def.'reseau-nomme') }
+            }
+            $modeTexte = Add-ReseauxNommesAuxModes -ModeTexte $modeTexte -Segments $segments
             $modes = ConvertTo-ListeModes -ModeTexte $modeTexte -ReseauTexte $reseauTexte
+            $modes = @(Resolve-ModesReseau -Modes $modes)
             $brut = @()
             if ($def.PSObject.Properties['set'] -and $null -ne $def.set) {
                 if ($def.set -is [System.Management.Automation.PSCustomObject]) {
@@ -488,8 +539,9 @@ function ConvertTo-DescriptionLabo {
     # Options générales : elles s'appliquent à toutes les machines du labo.
     $ramDefaut = if ($o.ContainsKey('ram')) { ConvertTo-RamGo -Texte $o['ram'] } else { 2 }
     $cpuDefaut = if ($o.ContainsKey('cpu')) { ConvertTo-Entier -Texte $o['cpu'] -Option 'cpu' -Min 1 -Max 64 } else { 2 }
-    $modes = ConvertTo-ListeModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) `
+    $modes = ConvertTo-ListeModes -ModeTexte (Add-ReseauxNommesAuxModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) -Segments $Analyse.Segments.ToArray()) `
                                   -ReseauTexte $(if ($o.ContainsKey('reseau')) { $o['reseau'] } else { $null })
+    $modes = @(Resolve-ModesReseau -Modes $modes)
     $brut = $Analyse.Sets.ToArray()
     $vnc = Test-OptionActivee -Analyse $Analyse -Nom 'vnc'
     $sansInterface = $o.ContainsKey('nogui')
@@ -565,8 +617,11 @@ function Invoke-CommandeCreation {
     $nom    = if ($o.ContainsKey('name')) { $o['name'].Trim() } else { '' }
     $ramGo  = if ($o.ContainsKey('ram')) { ConvertTo-RamGo -Texte $o['ram'] } else { 2 }
     $cpu    = if ($o.ContainsKey('cpu')) { ConvertTo-Entier -Texte $o['cpu'] -Option 'cpu' -Min 1 -Max 64 } else { 2 }
-    $modes  = ConvertTo-ListeModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) `
+    $modeTexte = Add-ReseauxNommesAuxModes -ModeTexte $(if ($o.ContainsKey('mode')) { $o['mode'] } else { $null }) `
+                                           -Segments $Analyse.Segments.ToArray()
+    $modes  = ConvertTo-ListeModes -ModeTexte $modeTexte `
                                    -ReseauTexte $(if ($o.ContainsKey('reseau')) { $o['reseau'] } else { $null })
+    $modes  = @(Resolve-ModesReseau -Modes $modes)
 
     if ($o.ContainsKey('tmp') -and $o.ContainsKey('nostart')) {
         throw (New-ErreurUsage "--tmp et --nostart sont incompatibles : une VM éphémère est supprimée dès qu'elle est trouvée éteinte, la créer sans la démarrer la condamnerait au prochain lancement de vazy. Retirez l'une des deux options.")
@@ -844,6 +899,64 @@ function Invoke-CommandeUnsnap {
         }
     }
     Remove-InstantaneVm -Nom $nom -Libelle $libelle | Out-Null
+}
+
+# vazy net list | add <nom> [--adresse a.b.c.0] [--dhcp] | rm <nom>
+function Invoke-CommandeNet {
+    param($Analyse)
+    $sous = if ($Analyse.Positionnels.Count -ge 2) { $Analyse.Positionnels[1].ToLower() } else { 'list' }
+    switch ($sous) {
+
+        'list' {
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 2
+            $liste = @(Get-ListeReseaux)
+            if ($liste.Count -eq 0) {
+                Write-Host "Aucun segment réseau personnalisé." -ForegroundColor Gray
+                Write-Host "Un segment est un réseau isolé auquel rattacher plusieurs VM, là où « hostonly » les met toutes ensemble." -ForegroundColor Gray
+                Write-Host "Pour en créer un : vazy net add labo-dmz" -ForegroundColor Gray
+                return
+            }
+            $tab = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($r in $liste) {
+                $tab.Add(@($r.Nom, $r.Identifiant, $(if ($r.Adresse) { $r.Adresse } else { '-' }),
+                           $(if ($r.Dhcp) { 'oui' } else { 'non' }), $r.Etat, [string]@($r.Vms).Count))
+            }
+            Write-Tableau -EnTetes @('Segment', 'Identifiant', 'Réseau', 'DHCP', 'État', 'VM') -Lignes $tab.ToArray()
+            foreach ($r in $liste) {
+                if (@($r.Vms).Count -gt 0) {
+                    Write-Host ("  {0} : {1}" -f $r.Nom, (@($r.Vms) -join ', ')) -ForegroundColor Gray
+                }
+            }
+        }
+
+        'add' {
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage 'Usage : vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]') }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $o = $Analyse.Options
+            $adresse = if ($o.ContainsKey('adresse')) { $o['adresse'].Trim() } else { '' }
+            $r = New-ReseauLabo -Nom $Analyse.Positionnels[2] -Adresse $adresse -Dhcp:($o.ContainsKey('dhcp'))
+            Write-Host ''
+            Write-Host ("Pour y brancher une VM : vazy <modele> --reseau-nomme {0}" -f $r.Nom) -ForegroundColor Gray
+            Write-Host ("Dans un fichier de labo : `"reseau-nomme`": `"{0}`"" -f $r.Nom) -ForegroundColor Gray
+        }
+
+        'rm' {
+            if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage 'Usage : vazy net rm <nom> [--yes]') }
+            Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
+            $nom = $Analyse.Positionnels[2]
+            if (-not $Analyse.Options.ContainsKey('yes')) {
+                if (-not (Read-Confirmation -Question "Supprimer le segment réseau « $nom » ?")) {
+                    Write-Host 'Abandon.' -ForegroundColor Gray
+                    return
+                }
+            }
+            Remove-ReseauLabo -Nom $nom
+        }
+
+        default {
+            throw (New-ErreurUsage "Sous-commande inconnue : « $sous ». Usage : vazy net list | add <nom> [--adresse a.b.c.0] [--dhcp] | rm <nom>")
+        }
+    }
 }
 
 function Write-TableauLabo {
@@ -1302,6 +1415,7 @@ try {
             'unsnap'   { Invoke-CommandeUnsnap   -Analyse $analyse }
             'gc'       { Invoke-CommandeGc       -Analyse $analyse }
             'lab'      { Invoke-CommandeLab      -Analyse $analyse }
+            'net'      { Invoke-CommandeNet      -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }

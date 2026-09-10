@@ -1,6 +1,6 @@
 # Tests de vazy
 
-66 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
+104 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
 
 ```powershell
 Invoke-Pester -Path .\tests
@@ -101,6 +101,13 @@ It 'refuse un nom deja pris sans rien creer' {
   seule changée avertit sans bloquer, une VM `freeze` n'est plus vérifiée.
 - **Labos** : ordre topologique, refus des cycles et dépendances inconnues,
   idempotence de `lab up`, et retour arrière borné aux VM créées par le montage.
+- **Segments réseau** : traduction du nom parlant en identifiant du pilote,
+  refus d'un segment disparu **avant** tout clonage, refus de supprimer un
+  segment encore utilisé (en nommant les VM), et export d'un labo qui réécrit
+  le nom parlant pour rester relisible ailleurs.
+- **Contrat des pilotes** : chaque pilote fournit les mêmes fonctions avec les
+  mêmes paramètres, et les couches 1 et 2 ne contiennent aucun terme propre à
+  un hyperviseur — vérifié sur l'arbre syntaxique.
 - **Intégration** : cycle de vie complet, `--dry-run` qui ne modifie rien,
   et lecture d'un fichier de labo (JSON invalide, virgule finale, clé inconnue
   au niveau du labo ou d'une machine — le message doit nommer les deux).

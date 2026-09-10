@@ -6,7 +6,7 @@
 Invoke-Pester -Path .\tests
 ```
 
-66 tests, qui tournent **sans VMware installé** : la couche pilote est
+104 tests, qui tournent **sans VMware installé** : la couche pilote est
 remplacée par un faux pilote en mémoire. Rien à installer — Pester 3.4.0 est
 livré avec Windows, et c'est la version qu'impose la CI.
 
