@@ -30,6 +30,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Délai maximal d'une commande, voir la note équivalente du pilote VMware.
+$script:DelaiCommandeSec = 1800
+
 $script:VBoxExe      = $null                          # chemin de VBoxManage.exe
 $script:Simulation   = $false                         # --dry-run
 $script:Observateur  = { param($Type, $Message) }     # journal et simulations
@@ -110,9 +113,35 @@ function Invoke-VBoxManage {
     }
 
     & $script:Observateur 'journal' $affichable
-    $lignes = & $script:VBoxExe @Arguments 2>&1 | ForEach-Object { [string]$_ }
-    $code = $LASTEXITCODE
-    return @{ Code = $code; Lignes = @($lignes); Sortie = ($lignes -join "`n") }
+    # Même précaution que côté VMware : « startvm » lance VirtualBoxVM.exe, qui
+    # hérite des tuyaux de sortie et les garde ouverts tant que la VM tourne.
+    # On attend la fin du processus, pas celle des flux.
+    $infos = New-Object System.Diagnostics.ProcessStartInfo
+    $infos.FileName = $script:VBoxExe
+    $infos.Arguments = ConvertTo-LigneCommande $Arguments
+    $infos.UseShellExecute = $false
+    $infos.RedirectStandardOutput = $true
+    $infos.RedirectStandardError = $true
+    $infos.CreateNoWindow = $true
+    try {
+        $processus = [System.Diagnostics.Process]::Start($infos)
+    } catch {
+        throw (New-ErreurPilote "Impossible de lancer VBoxManage ($($script:VBoxExe)) : $($_.Exception.Message)" `
+            "Vérifiez que ce fichier existe et que VirtualBox est correctement installé.")
+    }
+    $lectureSortie  = $processus.StandardOutput.ReadToEndAsync()
+    $lectureErreurs = $processus.StandardError.ReadToEndAsync()
+    if (-not $processus.WaitForExit($script:DelaiCommandeSec * 1000)) {
+        try { $processus.Kill() } catch { }
+        throw (New-ErreurPilote "VBoxManage n'a pas répondu au bout de $($script:DelaiCommandeSec) s : $affichable" `
+            ("Regardez VirtualBox : une fenêtre attend peut-être une réponse.`n" +
+             "L'opération a peut-être abouti malgré tout : vérifiez avec vazy list avant de recommencer."))
+    }
+    $sortie  = if ($lectureSortie.Wait(2000))  { $lectureSortie.Result }  else { '' }
+    $erreurs = if ($lectureErreurs.Wait(1000)) { $lectureErreurs.Result } else { '' }
+    $texte = (($sortie + "`n" + $erreurs) -replace "`r", '').Trim()
+    $lignes = @($texte -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    return @{ Code = $processus.ExitCode; Lignes = $lignes; Sortie = $texte }
 }
 
 # Message d'erreur lisible extrait de la sortie de VBoxManage.

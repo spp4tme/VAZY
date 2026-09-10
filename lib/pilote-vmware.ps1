@@ -85,6 +85,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Délai maximal d'une commande de l'hyperviseur. Volontairement large : un
+# clone complet d'une grosse VM prend plusieurs dizaines de minutes. Il n'est
+# pas là pour rythmer le travail, seulement pour qu'une commande réellement
+# bloquée finisse par rendre la main avec un message, au lieu de figer vazy.
+$script:DelaiCommandeSec = 1800
+
 $script:VmrunExe    = $null                          # chemin de vmrun.exe, renseigné par Initialize-Pilote
 $script:Simulation  = $false                         # --dry-run : rien n'est modifié, les commandes sont affichées
 $script:Observateur = { param($Type, $Message) }     # journal et simulations, fourni par la logique
@@ -193,11 +199,26 @@ function Invoke-Vmrun {
         throw (New-ErreurPilote "Impossible de lancer vmrun ($($script:VmrunExe)) : $($_.Exception.Message)" `
             "Vérifiez que ce fichier existe et que VMware Workstation est correctement installé.")
     }
-    # Lecture asynchrone de stderr pour éviter tout blocage si les deux flux sont remplis.
+    # Les deux flux sont lus de façon asynchrone, et JAMAIS attendus
+    # indéfiniment. « vmrun start ... gui » lance l'interface de VMware
+    # Workstation, qui hérite des tuyaux de sortie redirigés et les garde
+    # ouverts tant qu'elle vit : un ReadToEnd() classique ne rendrait la main
+    # qu'à la fermeture de VMware, alors que vmrun, lui, s'est terminé depuis
+    # longtemps. On attend donc la fin du PROCESSUS, puis on prend ce qui est
+    # arrivé dans les flux, sans se laisser retenir par un enfant survivant.
+    $lectureSortie  = $processus.StandardOutput.ReadToEndAsync()
     $lectureErreurs = $processus.StandardError.ReadToEndAsync()
-    $sortie = $processus.StandardOutput.ReadToEnd()
-    $processus.WaitForExit()
-    $texte = (($sortie + "`n" + $lectureErreurs.Result) -replace "`r", '').Trim()
+    # WaitForExit(int) attend le processus seul ; WaitForExit() sans argument
+    # attendrait aussi la fin de la redirection, donc l'interface VMware.
+    if (-not $processus.WaitForExit($script:DelaiCommandeSec * 1000)) {
+        try { $processus.Kill() } catch { }
+        throw (New-ErreurPilote "vmrun n'a pas répondu au bout de $($script:DelaiCommandeSec) s : $affichable" `
+            ("Regardez VMware Workstation : une fenêtre attend peut-être une réponse.`n" +
+             "L'opération a peut-être abouti malgré tout : vérifiez avec vazy list avant de recommencer."))
+    }
+    $sortie  = if ($lectureSortie.Wait(2000))  { $lectureSortie.Result }  else { '' }
+    $erreurs = if ($lectureErreurs.Wait(1000)) { $lectureErreurs.Result } else { '' }
+    $texte = (($sortie + "`n" + $erreurs) -replace "`r", '').Trim()
     if ($secret) { $texte = $texte.Replace($secret, '***') }   # jamais de mot de passe dans un message
     $lignes = @($texte -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     & $script:Observateur 'journal' ('{0}  -> code {1} en {2:0.0} s' -f $affichable, $processus.ExitCode, $chrono.Elapsed.TotalSeconds)
