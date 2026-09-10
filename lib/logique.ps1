@@ -1730,8 +1730,16 @@ function Get-LienVnc {
     param([Parameter(Mandatory = $true)]$Vm)
     if (-not $Vm.VncActif) { return $null }
     $adresse = Get-AdresseAffichage
+    # Le protocole vient du pilote : tous les hyperviseurs n'offrent pas VNC
+    # (VirtualBox parle RDP sans son extension VNC). Repli sur vnc pour un
+    # pilote antérieur à cette clé.
+    $pilote = Connect-Pilote
+    $schema = 'vnc'
+    if ($pilote.Contains('SchemaAffichageDistant') -and $pilote['SchemaAffichageDistant']) {
+        $schema = [string]$pilote['SchemaAffichageDistant']
+    }
     return [pscustomobject]@{
-        Lien    = ('vnc://:{0}@{1}:{2}' -f $Vm.Vnc['motDePasse'], $adresse.Adresse, $Vm.VncPort)
+        Lien    = ('{0}://:{1}@{2}:{3}' -f $schema, $Vm.Vnc['motDePasse'], $adresse.Adresse, $Vm.VncPort)
         Adresse = $adresse.Adresse
         Source  = $adresse.Source
         Port    = $Vm.VncPort

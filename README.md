@@ -1157,10 +1157,22 @@ Toute erreur est une exception dont la donnée `Conseil` dit quoi faire ; la cou
 
 ### 18.2 Ajouter un pilote
 
-1. Créez `lib\pilote-virtualbox.ps1` qui définit ces fonctions avec les mêmes paramètres et les mêmes retours. Le chemin de machine devient celui du `.vbox`, et `ExtensionMachine` vaut `.vbox`.
-2. `vazy config hyperviseur virtualbox`.
+1. Créez `lib\pilote-<nom>.ps1` qui définit ces fonctions avec les mêmes paramètres et les mêmes retours.
+2. `vazy config hyperviseur <nom>`.
 
-Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre à un hyperviseur.
+Rien d'autre à modifier : les couches 1 et 2 ne contiennent aucune ligne propre à un hyperviseur. Ce n'est pas une affirmation en l'air — `tests\Logic\Contrat.Tests.ps1` le vérifie à chaque exécution, en analysant l'arbre syntaxique des deux couches.
+
+### 18.3 Le pilote VirtualBox
+
+`lib\pilote-virtualbox.ps1` existe et implémente le contrat complet via `VBoxManage` :
+
+```
+vazy config hyperviseur virtualbox
+```
+
+Il a demandé **une seule ligne de changement** dans les couches 1 et 2 : le lien de l'écran distant était figé sur `vnc://`, alors que VirtualBox parle RDP sans son extension VNC. Le protocole vient désormais du pilote (clé `SchemaAffichageDistant`).
+
+Attention : ce pilote **n'a jamais été exécuté face à un vrai VirtualBox**. Les écarts réels avec VMware — identité des machines, `--set`, réseau host-only, écran distant, personnalisation de l'invité — et l'ordre de test recommandé sont dans **[docs/PILOTE-VIRTUALBOX.md](docs/PILOTE-VIRTUALBOX.md)**.
 
 ---
 

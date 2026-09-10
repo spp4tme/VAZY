@@ -15,6 +15,12 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 - `LICENSE` (MIT), `CONTRIBUTING.md`, et ce fichier.
 - `$env:VAZY_PILOTE` impose un fichier de pilote précis. Sans effet quand la
   variable est absente ; sert aux tests à injecter le faux pilote.
+- **Second pilote : Oracle VirtualBox** (`vazy config hyperviseur virtualbox`).
+  Contrat complet via `VBoxManage`. Jamais exécuté face à un vrai VirtualBox :
+  écarts, limites et ordre de test dans `docs/PILOTE-VIRTUALBOX.md`.
+- Test de conformité des pilotes : le contrat est extrait des faits et exigé de
+  chaque pilote, et l'absence de terme propre à un hyperviseur dans les couches
+  1 et 2 est vérifiée par analyse syntaxique.
 
 ### Corrigé
 
@@ -26,6 +32,9 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 
 - `Set-StrictMode -Version Latest` et `$ErrorActionPreference = 'Stop'` en tête
   des trois couches.
+- Le protocole de l'écran distant vient du pilote (`SchemaAffichageDistant`) au
+  lieu d'être figé sur `vnc://` dans la logique. Aucun changement visible sous
+  VMware ; c'était la seule hypothèse d'hyperviseur restée dans la couche 2.
 
 ## [1.8.0] — 2026-09-09
 

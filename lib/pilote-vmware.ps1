@@ -385,6 +385,9 @@ function Initialize-Pilote {
         SensibleHyperV    = $true    # VMware passe en mode dégradé (WHP) quand Hyper-V possède le processeur
         # {0} = exécutable de l'hyperviseur, {1} = chemin de la machine
         ConseilInstantane = 'VM éteinte, dans VMware Workstation : menu VM > Snapshot > Take Snapshot, nommez-le « base ». Ou en ligne de commande : "{0}" -T ws snapshot "{1}" base'
+        # Protocole de l'écran distant, dont la logique tire le lien affiché.
+        # VMware Workstation Pro embarque un serveur VNC : rien à installer.
+        SchemaAffichageDistant = 'vnc'
     }
 }
 

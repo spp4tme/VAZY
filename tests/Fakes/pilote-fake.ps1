@@ -225,6 +225,7 @@ function Initialize-Pilote {
         # machine qui les exécute (Invoke-AvertissementHyperV sort aussitôt).
         SensibleHyperV    = $false
         ConseilInstantane = 'Prenez un instantané nommé « base » ({0} sur {1}).'
+        SchemaAffichageDistant = 'vnc'
     }
 }
 
@@ -444,7 +445,8 @@ function Invoke-MachineScript {
         [Parameter(Mandatory = $true)][string]$Machine,
         [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Identifiants,
         [Parameter(Mandatory = $true)][string]$Systeme,
-        [Parameter(Mandatory = $true)][string]$Script
+        [Parameter(Mandatory = $true)][string]$Script,
+        [int]$Tentatives = 2
     )
     # Le mot de passe n'est volontairement pas journalisé : le contrat interdit
     # qu'il apparaisse où que ce soit, et un test le vérifie.
