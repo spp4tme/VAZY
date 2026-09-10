@@ -1179,6 +1179,23 @@ function Get-StatutLabo {
     return $lignes   # l'appelant entoure de @()
 }
 
+# Défait les créations d'un montage de labo interrompu en cours de route.
+#
+# C'est la seule suppression automatique de vazy en dehors des VM éphémères,
+# et elle est volontairement étroite : elle ne porte QUE sur les VM créées par
+# l'appel en cours. Une VM qui existait avant le montage contient peut-être le
+# travail de l'utilisateur ; personne n'a demandé sa suppression, elle reste.
+function Undo-CreationsLabo {
+    param([string[]]$Noms, [string]$Labo)
+    $liste = @($Noms)
+    if ($liste.Count -eq 0) { return }
+    Publish-Message 'attention' ("Montage interrompu : suppression des {0} VM créées par ce « lab up » ({1}). Les VM du labo antérieures à cette commande sont conservées." -f $liste.Count, ($liste -join ', '))
+    foreach ($nom in $liste) {
+        try { Remove-VmParNom -Nom $nom | Out-Null }
+        catch { Publish-Message 'attention' ("« {0} » n'a pas pu être supprimée ({1}). Supprimez-la à la main : vazy rm {0}" -f $nom, $_.Exception.Message) }
+    }
+}
+
 # Monte le labo : crée les VM manquantes, démarre les VM éteintes dans l'ordre
 # des dépendances avec un délai entre deux démarrages, laisse le reste
 # tranquille. Relançable à volonté.
@@ -1218,13 +1235,26 @@ function Invoke-LaboUp {
     Invoke-AvertissementHyperV
 
     # --- Création des VM manquantes (sans les démarrer : l'ordre vient après) --
+    # Un labo monté à moitié n'est bon à rien et laisse l'utilisateur devant un
+    # ménage à faire : si une création échoue, on défait celles de ce montage-ci.
     $n = 0
+    $creeesIci = New-Object 'System.Collections.Generic.List[string]'
     foreach ($m in $ordre) {
         if ($aCreer -notcontains $m.Nom) { continue }
         $n++
         $nomVm = Get-NomVmLabo -Labo $Labo -Machine $m.Nom
         Publish-Message 'etape' ("Création {0}/{1} : {2} -> VM « {3} »" -f $n, $aCreer.Count, $m.Nom, $nomVm)
-        New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote -Vnc:$m.Vnc | Out-Null
+        try {
+            New-VmDepuisModele -Modele $m.Modele -Nom $nomVm -RamGo $m.RamGo -Cpu $m.Cpu -Modes @($m.Modes) -Brut @($m.Brut) -SansDemarrage -Labo $Labo.Nom -NomHote $m.NomHote -Vnc:$m.Vnc | Out-Null
+            $creeesIci.Add($nomVm)
+        } catch {
+            $defaites = $creeesIci.Count
+            Undo-CreationsLabo -Noms $creeesIci.ToArray() -Labo $Labo.Nom
+            $fait = if ($defaites -gt 0) { " Les $defaites VM déjà créées par ce montage ont été supprimées." } else { '' }
+            $_.Exception.Data['Conseil'] = [string]$_.Exception.Data['Conseil'] +
+                " Le labo « $($Labo.Nom) » n'a pas été monté.$fait Corrigez la cause, puis relancez : vazy lab up $($Labo.Nom)"
+            throw
+        }
     }
 
     # --- Démarrage dans l'ordre des dépendances -----------------------------

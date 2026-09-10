@@ -98,7 +98,9 @@ function Write-AppelFake {
     Save-EtatFake
     if ($global:VazyFake.Echecs.ContainsKey($Fonction)) {
         $e = $global:VazyFake.Echecs[$Fonction]
-        if ($e.Restant -gt 0) {
+        if ($e.Saut -gt 0) {
+            $e.Saut--            # on laisse passer les premiers appels
+        } elseif ($e.Restant -gt 0) {
             $e.Restant--
             if ($e.Restant -eq 0) { $global:VazyFake.Echecs.Remove($Fonction) }
             throw (New-ErreurFake $e.Message $e.Conseil)
@@ -133,16 +135,19 @@ function Test-AppelPilote {
 
 function Set-EchecPilote {
     <#
-        Programme un échec : le prochain appel à $Fonction lèvera une erreur.
+        Programme un échec : un prochain appel à $Fonction lèvera une erreur.
         -Fois : nombre d'appels à faire échouer (1 par défaut).
+        -Saut : nombre d'appels à laisser passer avant de commencer à échouer
+                (pour faire échouer la deuxième VM d'un labo, par exemple).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Fonction,
         [string]$Message = 'échec simulé par le faux pilote',
         [string]$Conseil = 'Ceci est un test.',
-        [int]$Fois = 1
+        [int]$Fois = 1,
+        [int]$Saut = 0
     )
-    $global:VazyFake.Echecs[$Fonction] = @{ Message = $Message; Conseil = $Conseil; Restant = $Fois }
+    $global:VazyFake.Echecs[$Fonction] = @{ Message = $Message; Conseil = $Conseil; Restant = $Fois; Saut = $Saut }
 }
 
 function Register-ModeleFake {
