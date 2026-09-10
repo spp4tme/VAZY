@@ -1011,10 +1011,34 @@ Tout est dans `%LOCALAPPDATA%\vazy\`, c'est-à-dire `C:\Users\<vous>\AppData\Loc
 | `outilHyperviseur` | Chemin de `vmrun.exe` si la détection automatique échoue | détection automatique |
 | `espaceDisqueMinGo` | Marge d'espace libre exigée, en plus de la mémoire de la VM | `1` |
 | `delaiOutilsSec` | Attente maximale des outils invité, de 5 à 1800 secondes | `120` |
+| `delaiPoolSec` | Attente maximale qu'un invité s'annonce prêt à être figé | `180` |
+| `poolReposSec` | Repli : temps laissé à l'invité avant de le figer, faute de poignée de main | `20` |
 | `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants | `5901`, `5999` |
 | `hyperviseur` | Pilote utilisé, c'est-à-dire `lib\pilote-<hyperviseur>.ps1` | `vmware` |
 
 **Espace disque** : avant de cloner, vazy vérifie qu'il reste au moins la mémoire de la VM plus la marge sur le disque de destination, car VMware crée pendant l'exécution un fichier de la taille de la mémoire. Sinon il refuse, sans rien créer.
+
+### 14.5 La vue temps réel
+
+```
+vazy top
+```
+
+Toutes les VM, leur état, leur mémoire, leur réseau, leur adresse IP, et leur appartenance à un labo ou à une réserve — rafraîchi toutes les deux secondes.
+
+| Touche | Effet |
+|---|---|
+| Haut / Bas | Choisir une VM |
+| `s` | La démarrer |
+| `x` | L'arrêter |
+| `r` | La remettre à zéro |
+| `q` ou Échap | Quitter |
+
+L'adresse IP n'est demandée que pour les VM **en marche** : interroger l'hyperviseur au sujet d'une machine éteinte coûterait un aller-retour à chaque tour de boucle pour rien.
+
+Aucun service en tâche de fond, aucun verrou tenu : à chaque tour, la vue relit le catalogue et interroge l'hyperviseur, exactement comme `vazy list`. Entre deux tours, une autre commande vazy peut travailler dans une autre fenêtre — la règle « une commande à la fois » est intacte, et les changements apparaissent au rafraîchissement suivant.
+
+Sans console interactive — sortie redirigée, script, tâche planifiée — `vazy top` affiche un instantané et rend la main, au lieu de boucler indéfiniment.
 
 Deux variables d'environnement, utiles pour les essais :
 

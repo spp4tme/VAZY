@@ -902,6 +902,18 @@ function Get-MachineVariableInvite {
     return ''
 }
 
+function Get-MachineAdresseIp {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $nom = $null
+    try { $nom = Get-NomMachine -Machine $Machine } catch { return '' }
+    $r = Invoke-VBoxManage @('guestproperty', 'get', $nom, '/VirtualBox/GuestInfo/Net/0/V4/IP') -Lecture
+    if ($r.Code -ne 0) { return '' }
+    foreach ($l in $r.Lignes) {
+        if ($l -match '^\s*Value:\s*(\d{1,3}(\.\d{1,3}){3})\s*$') { return $Matches[1] }
+    }
+    return ''
+}
+
 function Get-MachineOccupationGo {
     param([Parameter(Mandatory = $true)][string]$Machine)
     $dossier = Split-Path -Parent $Machine

@@ -127,6 +127,8 @@ USAGE
   vazy pool refill <modele> [--size <n>]
                                      complète la réserve jusqu'à la taille voulue
   vazy pool destroy <modele> [--yes] détruit la réserve et libère la place
+  vazy top                           vue qui se rafraîchit : toutes les VM, leur état et leur
+                                     IP ; flèches pour choisir, s/x/r pour agir, q pour sortir
   vazy net list                      segments réseau personnalisés déclarés, et leurs VM
   vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
                                      crée un segment isolé (droits administrateur requis
@@ -975,6 +977,125 @@ function Invoke-CommandeUnsnap {
     Remove-InstantaneVm -Nom $nom -Libelle $libelle | Out-Null
 }
 
+# vazy top : vue qui se rafraîchit, avec sélection au clavier.
+#
+# Pas de service en tâche de fond ni de verrou tenu : à chaque tour la vue
+# relit le catalogue et interroge l'hyperviseur, exactement comme le ferait
+# « vazy list ». Entre deux tours, une autre commande vazy peut travailler
+# tranquillement — la contrainte « une commande à la fois » est intacte.
+function Invoke-CommandeTop {
+    param($Analyse)
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 1
+
+    # Sans console interactive (sortie redirigée, tâche planifiée), on affiche
+    # un instantané et on sort : une boucle n'y servirait à rien.
+    $interactif = $true
+    try { $null = [Console]::KeyAvailable } catch { $interactif = $false }
+    if ($Host.Name -eq 'Default Host') { $interactif = $false }
+
+    $selection = 0
+    $intervalle = 2000      # millisecondes entre deux rafraîchissements
+    $message = ''
+
+    while ($true) {
+        $vms = @(Get-VueEnsemble -AvecIp)
+        if ($vms.Count -gt 0) {
+            if ($selection -ge $vms.Count) { $selection = $vms.Count - 1 }
+            if ($selection -lt 0) { $selection = 0 }
+        }
+
+        if ($interactif) { try { [Console]::Clear() } catch { } }
+        Write-Host ('vazy top    {0}    {1} VM' -f (Get-Date -Format 'HH:mm:ss'), $vms.Count) -ForegroundColor White
+        Write-Host ''
+
+        if ($vms.Count -eq 0) {
+            Write-Host '  Aucune VM. Créez-en une : vazy <modele>' -ForegroundColor Gray
+        } else {
+            $tab = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($vm in $vms) {
+                $marque = @()
+                if ($vm.Pool)     { $marque += 'réserve' }
+                if ($vm.Ephemere) { $marque += 'éphémère' }
+                if ($vm.Labo)     { $marque += ('labo ' + $vm.Labo) }
+                $tab.Add(@($vm.Nom, $vm.Etat, $vm.Modele, ('{0} Go' -f $vm.RamGo), [string]$vm.Cpu,
+                           $vm.Reseau, $(if ($vm.Ip) { $vm.Ip } else { '-' }), ($marque -join ', ')))
+            }
+            # La ligne sélectionnée est repérée par une flèche : plus lisible
+            # qu'une inversion vidéo, et sans dépendance au terminal.
+            $lignes = @($tab.ToArray())
+            $entetes = @('VM', 'État', 'Modèle', 'RAM', 'CPU', 'Réseau', 'IP', '')
+            $largeurs = @()
+            for ($c = 0; $c -lt $entetes.Count; $c++) {
+                $max = $entetes[$c].Length
+                foreach ($l in $lignes) { if ([string]$l[$c] -and ([string]$l[$c]).Length -gt $max) { $max = ([string]$l[$c]).Length } }
+                $largeurs += $max
+            }
+            $enTete = '  '
+            for ($c = 0; $c -lt $entetes.Count; $c++) { $enTete += ($entetes[$c]).PadRight($largeurs[$c] + 2) }
+            Write-Host $enTete -ForegroundColor DarkGray
+            for ($i = 0; $i -lt $lignes.Count; $i++) {
+                $texte = $(if ($interactif -and $i -eq $selection) { '> ' } else { '  ' })
+                for ($c = 0; $c -lt $entetes.Count; $c++) { $texte += ([string]$lignes[$i][$c]).PadRight($largeurs[$c] + 2) }
+                $couleur = switch ($vms[$i].Etat) {
+                    'en marche' { 'Green' }
+                    'figée'     { 'Cyan' }
+                    'absente'   { 'Red' }
+                    default     { 'Gray' }
+                }
+                if ($interactif -and $i -eq $selection) { Write-Host $texte -ForegroundColor White }
+                else { Write-Host $texte -ForegroundColor $couleur }
+            }
+        }
+
+        if ($message) { Write-Host ''; Write-Host ('  ' + $message) -ForegroundColor Yellow }
+
+        if (-not $interactif) { return }
+
+        Write-Host ''
+        Write-Host '  Haut/Bas : choisir    s : démarrer    x : arrêter    r : remettre à zéro    q : quitter' -ForegroundColor DarkGray
+
+        # Scrutation du clavier pendant l'intervalle, pour que les touches
+        # répondent tout de suite au lieu d'attendre le tour suivant.
+        $chrono = [System.Diagnostics.Stopwatch]::StartNew()
+        $agir = ''
+        while ($chrono.ElapsedMilliseconds -lt $intervalle) {
+            if ([Console]::KeyAvailable) {
+                $touche = [Console]::ReadKey($true)
+                switch ($touche.Key) {
+                    'UpArrow'   { $selection--; $agir = 'redessiner' }
+                    'DownArrow' { $selection++; $agir = 'redessiner' }
+                    'Q'         { $agir = 'quitter' }
+                    'S'         { $agir = 'demarrer' }
+                    'X'         { $agir = 'arreter' }
+                    'R'         { $agir = 'reset' }
+                    'Escape'    { $agir = 'quitter' }
+                }
+                if ($agir) { break }
+            }
+            Start-Sleep -Milliseconds 60
+        }
+
+        if ($agir -eq 'quitter') {
+            try { [Console]::Clear() } catch { }
+            Write-Host 'vazy top : au revoir.' -ForegroundColor Gray
+            return
+        }
+        $message = ''
+        if ($agir -in 'demarrer', 'arreter', 'reset' -and $vms.Count -gt 0) {
+            $cible = $vms[$selection]
+            try {
+                switch ($agir) {
+                    'demarrer' { Start-VmParNom -Nom $cible.Nom | Out-Null; $message = "« $($cible.Nom) » démarrée." }
+                    'arreter'  { Stop-VmParNom  -Nom $cible.Nom | Out-Null; $message = "« $($cible.Nom) » arrêtée." }
+                    'reset'    { Reset-VmParNom -Nom $cible.Nom | Out-Null; $message = "« $($cible.Nom) » remise à zéro." }
+                }
+            } catch {
+                $message = "« $($cible.Nom) » : $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 # vazy pool create <modele> --size <n> | status [<modele>] | refill <modele> [--size <n>] | destroy <modele>
 function Invoke-CommandePool {
     param($Analyse)
@@ -1585,6 +1706,7 @@ try {
             'net'      { Invoke-CommandeNet      -Analyse $analyse }
             'pool'     { Invoke-CommandePool     -Analyse $analyse }
             'pop'      { Invoke-CommandePop      -Analyse $analyse }
+            'top'      { Invoke-CommandeTop      -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }

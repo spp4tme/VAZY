@@ -216,6 +216,26 @@ Describe 'Integration - segments reseau' {
     }
 }
 
+Describe 'Integration - vue temps reel' {
+
+    BeforeEach { Initialize-BacASable }
+
+    It 'affiche un instantane et sort, sans console interactive' {
+        # Point critique : sans clavier (sortie redirigee, script, CI), la vue
+        # ne doit PAS entrer dans sa boucle, sinon elle bloquerait pour de bon.
+        Invoke-Vazy ubuntu --name poste1 --nostart | Out-Null
+        $r = Invoke-Vazy top
+        $r.Code | Should Be 0
+        $r.Sortie | Should Match 'vazy top'
+        $r.Sortie | Should Match 'poste1'
+    }
+
+    It 'ne se plaint pas quand il n''y a aucune VM' {
+        $r = Invoke-Vazy top
+        $r.Code | Should Be 0
+    }
+}
+
 Describe 'Integration - diagnostic' {
 
     BeforeEach { Initialize-BacASable }

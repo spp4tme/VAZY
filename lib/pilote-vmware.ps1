@@ -50,6 +50,10 @@
 #  signale qu'il est prêt à être suspendu) :
 #    Get-MachineVariableInvite -Machine -Nom     -> valeur, ou '' si absente
 #
+#  Adresse IP vue depuis l'hyperviseur (vue temps réel) :
+#    Get-MachineAdresseIp      -Machine          -> adresse, ou '' si inconnue.
+#                                                   Ne doit JAMAIS attendre.
+#
 #  Occupation disque réelle d'une machine, en Go :
 #    Get-MachineOccupationGo   -Machine
 #                              -> @{ Differentiel ; Suspension ; Autres ; Total }
@@ -1026,6 +1030,18 @@ function Get-MachineVariableInvite {
     $valeur = ($r.Lignes -join "`n").Trim()
     if ($valeur -match '(?i)^no value found') { return '' }
     return $valeur
+}
+
+# Adresse IP rapportée par les outils invité. Sans « -wait » : cette fonction
+# est appelée en boucle par la vue temps réel, elle ne doit jamais bloquer.
+function Get-MachineAdresseIp {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    $r = Invoke-Vmrun @('getGuestIPAddress', $Machine)
+    if ($r.Code -ne 0) { return '' }
+    foreach ($l in $r.Lignes) {
+        if ($l -match '^\s*(\d{1,3}(\.\d{1,3}){3})\s*$') { return $Matches[1] }
+    }
+    return ''
 }
 
 # Occupation réelle sur le disque. Le clone lié partage les disques de base du

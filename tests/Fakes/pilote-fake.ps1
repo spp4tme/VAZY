@@ -285,6 +285,7 @@ function New-MachineDepuisModele {
         Variables   = @{}         # ce que vazy a déposé pour l'invité
         VariablesInvite = @{}     # ce que l'invité a répondu à vazy
         OccupationGo = 0.5        # place prise sur le disque, hors suspension
+        AdresseIp   = ''          # ce que l'hyperviseur rapporterait
         Vnc         = @{ Actif = $false; Port = 0; MotDePasse = '' }
         Complete    = $false
     }
@@ -588,6 +589,20 @@ function Get-MachineVariableInvite {
     $vars = $global:VazyFake.Machines[$Machine].VariablesInvite
     if ($vars.ContainsKey($Nom)) { return [string]$vars[$Nom] }
     return ''
+}
+
+function Get-MachineAdresseIp {
+    param([Parameter(Mandatory = $true)][string]$Machine)
+    if (-not $global:VazyFake.Machines.ContainsKey($Machine)) { return '' }
+    $etat = $global:VazyFake.Machines[$Machine]
+    if (-not $etat.EnMarche) { return '' }
+    return [string]$etat.AdresseIp
+}
+
+# Réservé aux tests : l'adresse que l'hyperviseur rapporterait.
+function Set-AdresseIpFake {
+    param([Parameter(Mandatory = $true)][string]$Chemin, [string]$Adresse = '192.168.1.50')
+    if ($global:VazyFake.Machines.ContainsKey($Chemin)) { $global:VazyFake.Machines[$Chemin].AdresseIp = $Adresse }
 }
 
 function Get-MachineOccupationGo {

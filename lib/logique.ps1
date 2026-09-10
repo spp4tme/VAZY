@@ -38,7 +38,7 @@ $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins cou
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
                            'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net',
-                           'pool', 'pop')
+                           'pool', 'pop', 'top')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -2671,6 +2671,56 @@ function Set-AliasModele {
 # ----------------------------------------------------------------------------
 #  Configuration
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+#  Vue d'ensemble (vazy top)
+#  Le catalogue est RELU à chaque appel : la vue tourne en boucle pendant que
+#  d'autres commandes vazy peuvent s'exécuter, et doit refléter ce qu'elles
+#  font. C'est aussi pourquoi elle ne garde rien verrouillé entre deux tours.
+# ----------------------------------------------------------------------------
+
+function Get-VueEnsemble {
+    param([switch]$AvecIp)
+    $script:Catalogue = Read-Catalogue
+    Connect-Pilote | Out-Null
+    $enCours = @(Get-MachineEnCours)
+    $liste = @()
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        $vm = $script:Catalogue['vms'][$nom]
+        $chemin = [string]$vm['chemin']
+        $etat = 'arrêtée'
+        $marche = $false
+        if (-not (Test-Path -LiteralPath $chemin -PathType Leaf)) {
+            $etat = 'absente'
+        } else {
+            foreach ($c in $enCours) { if ($c -ieq $chemin) { $marche = $true } }
+            if ($marche) { $etat = 'en marche' }
+            elseif ([string]$vm['pool']) {
+                $suspendue = $false
+                try { $suspendue = [bool](Test-MachineSuspendue -Machine $chemin) } catch { }
+                $etat = if ($suspendue) { 'figée' } else { 'arrêtée' }
+            }
+        }
+        $ip = ''
+        if ($AvecIp -and $marche) {
+            try { $ip = [string](Get-MachineAdresseIp -Machine $chemin) } catch { }
+        }
+        $liste += [pscustomobject]@{
+            Nom      = $nom
+            Etat     = $etat
+            Modele   = [string]$vm['modele']
+            RamGo    = $vm['ramGo']
+            Cpu      = $vm['cpu']
+            Reseau   = (@($vm['reseau']) -join ',')
+            Ip       = $ip
+            Labo     = [string]$vm['labo']
+            Pool     = [string]$vm['pool']
+            Ephemere = ($vm['ephemere'] -eq $true)
+            Chemin   = $chemin
+        }
+    }
+    return $liste
+}
 
 # ----------------------------------------------------------------------------
 #  Pool de VM chaudes
