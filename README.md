@@ -149,6 +149,26 @@ vazy config dossierVms D:\VMs
 
 Évitez un dossier synchronisé par OneDrive : les disques virtuels changent en permanence et la synchronisation ne suivra pas.
 
+### 3.4 Auto-complétion, facultative
+
+Une ligne dans votre profil PowerShell, et la touche Tab connaît vos VM :
+
+```powershell
+. "C:\chemin\vers\vazy\outils\completion.ps1"
+```
+
+Pour l'ajouter une fois pour toutes :
+
+```powershell
+Add-Content -Path $PROFILE -Value '. "C:\chemin\vers\vazy\outils\completion.ps1"'
+```
+
+Ce que Tab propose, selon l'endroit de la ligne : les commandes et vos modèles en premier mot, vos VM après `start`, `stop`, `rm`, `reset`, `snap`, `back`, `freeze`, `vnc`, vos labos après `lab up`, vos modèles après `pop` et `pool create`, vos segments après `net rm`, et les options dès que vous tapez un tiret.
+
+Le fichier lit le catalogue **directement** : il n'appelle jamais vazy. Une complétion doit répondre instantanément, et surtout n'avoir aucun effet de bord — lancer vazy déclencherait le nettoyage des VM éphémères à chaque appui sur Tab.
+
+Il ne change le comportement d'aucune commande. Sans lui, tout fonctionne pareil, en tapant les noms en entier.
+
 ---
 
 ## 4. Préparer un modèle
