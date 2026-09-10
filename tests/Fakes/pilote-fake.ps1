@@ -67,7 +67,7 @@ function Save-EtatFake {
         Systeme         = $global:VazyFake.Systeme
         OutilsRepondent = $global:VazyFake.OutilsRepondent
         CodeScript      = $global:VazyFake.CodeScript
-        Appels          = @($global:VazyFake.Appels)
+        Appels          = $global:VazyFake.Appels.ToArray()   # @() échouerait sur une liste vide
     }
     try { $aGarder | Export-Clixml -LiteralPath $env:VAZY_FAKE_ETAT -Depth 8 } catch { }
 }
@@ -83,7 +83,7 @@ function Restore-EtatFake {
         $global:VazyFake.Systeme         = $lu.Systeme
         $global:VazyFake.OutilsRepondent = $lu.OutilsRepondent
         $global:VazyFake.CodeScript      = $lu.CodeScript
-        foreach ($a in @($lu.Appels)) { $global:VazyFake.Appels.Add($a) }
+        if ($null -ne $lu.Appels) { foreach ($a in $lu.Appels) { $global:VazyFake.Appels.Add($a) } }
     } catch { }
 }
 
