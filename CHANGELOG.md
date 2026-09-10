@@ -30,6 +30,15 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 
 ### Corrigé
 
+- **vazy ne se fige plus au démarrage d'une VM.** `vmrun start <vm> gui` lance
+  l'interface de l'hyperviseur, qui hérite des tuyaux de sortie redirigés et
+  les garde ouverts tant qu'elle vit : la lecture de ces flux n'aurait rendu la
+  main qu'à la fermeture de VMware Workstation. Les commandes attendent
+  désormais la fin du **processus**, pas celle des flux, et un délai maximal
+  (30 min) garantit qu'une commande vraiment bloquée rend la main avec un
+  message. Même correction côté VirtualBox.
+- Un mot est affiché avant le démarrage d'une VM, pour que le silence qui suit
+  soit attendu plutôt qu'inquiétant.
 - `lab export` réécrit les segments sous leur nom parlant et non sous
   l'identifiant du pilote : un labo exporté redevient relisible sur une autre
   machine.

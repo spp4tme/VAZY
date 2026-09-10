@@ -2108,16 +2108,11 @@ function Start-VmAvecPersonnalisation {
         # Aucun nom demandé : ne laisse traîner aucune configuration antérieure.
         Set-MachineVariableInvite -Machine $Vm.Chemin -Nom 'vazy_config' -Valeur ''
     }
-    # Le démarrage ne rend la main qu'une fois la VM allumée, et il n'affiche
-    # rien pendant ce temps : une minute et demie avec Hyper-V actif. Sans ce
-    # message, l'utilisateur n'a aucune raison de penser que l'outil travaille
-    # encore, et il coupe.
-    $pilote = Connect-Pilote
-    if ((Get-InfosHote).HyperviseurPresent -eq $true -and $pilote.SensibleHyperV) {
-        Publish-Message 'info' ("démarrage de « {0} » en cours... Hyper-V est actif, {1} tourne en mode dégradé : comptez une à deux minutes sans affichage. Ne coupez pas." -f $Vm.Nom, $pilote.Nom)
-    } else {
-        Publish-Message 'info' ("démarrage de « {0} » en cours..." -f $Vm.Nom)
-    }
+    # Le démarrage n'affiche rien tant que la VM n'est pas allumée : quelques
+    # secondes en général, davantage quand l'interface de l'hyperviseur doit
+    # être lancée. Un mot avant l'appel, pour que le silence qui suit soit
+    # attendu plutôt qu'inquiétant.
+    Publish-Message 'info' ("démarrage de « {0} » en cours..." -f $Vm.Nom)
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     Start-Machine -Machine $Vm.Chemin -SansInterface:$SansInterface
     Publish-Message 'ok' ("VM « {0} » démarrée en {1}" -f $Vm.Nom, (Format-Duree $chrono.Elapsed.TotalSeconds))
