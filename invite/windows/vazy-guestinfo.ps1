@@ -4,11 +4,13 @@
 # avant le démarrage, et ce script lit.
 #
 # Lancé par la tâche planifiée « vazy-guestinfo » au démarrage, compte SYSTEM
-# (voir installer.ps1). Clés appliquées : hostname. Toute clé inconnue est
-# ignorée (compatibilité avec les versions futures : ip, masque, passerelle,
-# dns, cle_ssh). Idempotent : si le nom est déjà le bon, ne fait rien et ne
-# redémarre pas. Un renommage effectif exige un redémarrage : il n'est fait
-# qu'une fois, juste après.
+# (voir installer.ps1). Clé appliquée : hostname. Les clés d'adressage
+# statique (ip, masque, passerelle, dns) et cle_ssh sont appliquées par le
+# script Linux ; sous Windows elles sont ignorées pour l'instant, sans erreur.
+# Idempotent : si le nom est déjà le bon, ne fait rien et ne redémarre pas. Un
+# renommage effectif exige un redémarrage : il n'est fait qu'une fois, juste
+# après. Après un sysprep (nom aléatoire au premier démarrage), c'est ce
+# script qui donne à chaque clone le nom demandé par vazy.
 $ErrorActionPreference = 'Stop'
 $dossier = 'C:\ProgramData\vazy'
 $journal = Join-Path $dossier 'vazy-guestinfo.log'

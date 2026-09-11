@@ -38,8 +38,15 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
   différences), divergence par rapport au modèle, et bilan de ce que les
   clones liés font économiser. Les clones trop divergents sont signalés, aussi
   dans le rapport HTML. Seuil réglable : `seuilDivergencePct`.
-- `vazy net create` et `vazy net ls`, synonymes de `add` et `list` ; option`n  `--hostonly` acceptée — un segment est host-only par nature, elle ne change
+- `vazy net create` et `vazy net ls`, synonymes de `add` et `list` ; option
+  `--hostonly` acceptée — un segment est host-only par nature, elle ne change
   rien, elle le dit.
+- **Sysprep, facultatif, pour les modèles Windows** : script
+  `invite/windows/sysprep.ps1` à lancer dans le modèle avant son instantané
+  (vérifications, fichier de réponses, généralisation), et
+  `vazy template mark <alias> --sysprep`. vazy ne lance jamais sysprep
+  lui-même ; il prévient quand un labo tire plusieurs machines d'un modèle
+  Windows non généralisé — elles auraient le même SID. Catalogue v12.
 
 ### Corrigé
 

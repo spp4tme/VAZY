@@ -100,7 +100,7 @@ USAGE
   vazy template alias <alias> <nom standard> [--rm]
                                      fait répondre votre modèle à un nom standard, pour monter
                                      un labo partagé sans renommer quoi que ce soit
-  vazy template mark <alias> --guestinfo | --classique
+  vazy template mark <alias> --guestinfo | --classique   et/ou   --sysprep | --sans-sysprep
                                      modèle guestinfo : le script vazy-guestinfo est installé dedans,
                                      vazy dépose la configuration avant chaque démarrage, sans identifiant
   vazy template creds <alias> [--user <nom>] [--os linux|windows] [--rm]
@@ -229,7 +229,7 @@ function ConvertFrom-Arguments {
                            'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse', 'size', 'out',
                            'ip', 'masque', 'passerelle', 'dns', 'cle-ssh')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
-                           'dry-run', 'requis', 'tout', 'save', 'dhcp', 'hostonly')
+                           'dry-run', 'requis', 'tout', 'save', 'dhcp', 'hostonly', 'sysprep', 'sans-sysprep')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
@@ -856,12 +856,19 @@ function Invoke-CommandeTemplate {
             Set-AliasModele -Modele $Analyse.Positionnels[2] -NomStandard $Analyse.Positionnels[3] -Retirer:$Analyse.Options.ContainsKey('rm')
         }
         'mark' {
-            $usageMark = 'Usage : vazy template mark <alias> --guestinfo   (le script vazy-guestinfo est installé dans le modèle)   |   vazy template mark <alias> --classique'
+            $usageMark = 'Usage : vazy template mark <alias> --guestinfo | --classique   et/ou   --sysprep | --sans-sysprep'
             if ($Analyse.Positionnels.Count -lt 3) { throw (New-ErreurUsage $usageMark) }
             Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 3
-            $guestinfo = $Analyse.Options.ContainsKey('guestinfo'); $classique = $Analyse.Options.ContainsKey('classique')
-            if ($guestinfo -eq $classique) { throw (New-ErreurUsage $usageMark) }
-            Set-MarqueModele -Alias $Analyse.Positionnels[2] -Guestinfo $guestinfo
+            $o = $Analyse.Options
+            $guestinfo = $o.ContainsKey('guestinfo'); $classique = $o.ContainsKey('classique')
+            $sysprep = $o.ContainsKey('sysprep'); $sansSysprep = $o.ContainsKey('sans-sysprep')
+            if (($guestinfo -and $classique) -or ($sysprep -and $sansSysprep)) { throw (New-ErreurUsage ('Options contradictoires. ' + $usageMark)) }
+            if (-not ($guestinfo -or $classique -or $sysprep -or $sansSysprep)) { throw (New-ErreurUsage $usageMark) }
+            $alias = $Analyse.Positionnels[2]
+            # Les deux marques sont indépendantes : « mark x --guestinfo » garde
+            # exactement son comportement d'avant.
+            if ($guestinfo -or $classique) { Set-MarqueModele -Alias $alias -Guestinfo $guestinfo }
+            if ($sysprep -or $sansSysprep) { Set-SysprepModele -Alias $alias -Generalise $sysprep }
         }
         'creds' {
             $usageCreds = 'Usage : vazy template creds <alias> [--user <nom>] [--os linux|windows] [--rm]'

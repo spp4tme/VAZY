@@ -88,7 +88,7 @@ $script:VazyOptions = @(
     '--nostart', '--tmp', '--hostname', '--ip', '--masque', '--passerelle', '--dns', '--cle-ssh',
     '--vnc', '--snapshot', '--size', '--vm', '--save', '--labo', '--prefixe', '--vms', '--delai',
     '--adresse', '--dhcp', '--yes', '--hard', '--stop-only', '--dry-run', '--requis', '--tout',
-    '--guestinfo', '--classique', '--out', '--help', '--version'
+    '--guestinfo', '--classique', '--sysprep', '--sans-sysprep', '--out', '--help', '--version'
 )
 
 # Découpe la ligne en mots, sans le mot en cours de frappe.

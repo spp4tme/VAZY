@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:NomOutil       = 'vazy'
 $script:VersionOutil   = '1.9.0'
-$script:VersionCatalogue = 11         # schéma de catalogue.json (voir Read-Catalogue)
+$script:VersionCatalogue = 12         # schéma de catalogue.json (voir Read-Catalogue)
 $script:SeuilNettoyage = 3            # au-delà de ce nombre de VM éphémères à supprimer d'un coup, on demande confirmation
 $script:InstantaneNeuf = 'vazy-neuf'  # point de retour pris à la création, cible de « vazy reset »
 $script:DossierDonnees = if ($env:VAZY_HOME) { $env:VAZY_HOME } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'vazy' }
@@ -278,6 +278,9 @@ function Save-Config {
 #                 configuration réseau statique et clé SSH déposées dans
 #                 l'invité par guestinfo. Vide = adressage laissé au DHCP,
 #                 comportement d'avant.
+#   version 12 : + modeles.<alias>.sysprep ($true = modèle Windows généralisé
+#                 par sysprep avant la prise de son instantané : ses clones
+#                 ont des SID distincts)
 #   Les entrées gardent toute clé inconnue : de futurs champs s'ajoutent sans
 #   migration destructive.
 function Read-Catalogue {
@@ -349,6 +352,10 @@ function Read-Catalogue {
         }
         if ($m -is [System.Collections.IDictionary] -and -not $m.Contains('alias')) {
             $m['alias'] = @()            # noms standards auxquels ce modèle répond (labos partagés)
+            $modifie = $true
+        }
+        if ($m -is [System.Collections.IDictionary] -and -not $m.Contains('sysprep')) {
+            $m['sysprep'] = $false       # modèle d'avant la v12 : réputé non généralisé
             $modifie = $true
         }
     }
@@ -1264,6 +1271,11 @@ function Invoke-LaboUp {
     $chrono = [System.Diagnostics.Stopwatch]::StartNew()
     Publish-Message 'etape' "Vérifications du labo « $($Labo.Nom) »"
     $ordre = @(Test-Labo -Labo $Labo)
+    # Un avertissement, jamais un refus : hors domaine, des SID identiques ne
+    # gênent personne, et c'est à l'utilisateur de savoir ce que fait son TP.
+    foreach ($s in @(Get-ModelesNonGeneralisesDuLabo -Labo $Labo)) {
+        Publish-Message 'attention' ("{0} machines de ce labo sortent du modèle Windows « {1} », qui n'est pas généralisé : elles auront toutes le même SID. Sans conséquence hors domaine ; pour un domaine Active Directory, préparez le modèle avec sysprep (README, section 4.8) puis : vazy template mark {1} --sysprep" -f $s.Machines, $s.Modele)
+    }
     $statut = @(Get-StatutLabo -Labo $Labo)
 
     # Fiches dont les fichiers ont disparu : on les retire pour recréer la VM.
@@ -2106,6 +2118,68 @@ function Get-MethodePersonnalisation {
     return 'aucune'
 }
 
+# ----------------------------------------------------------------------------
+#  Sysprep (modèles Windows, facultatif)
+#
+#  Deux clones d'un même modèle Windows ont le même SID de machine. Hors
+#  domaine, personne ne s'en aperçoit. Dans un domaine Active Directory c'est
+#  une autre affaire : Microsoft ne prend pas en charge des machines de même
+#  SID sur un domaine, et certaines opérations s'y comportent mal. La réponse
+#  officielle est sysprep, lancé UNE fois dans le modèle, juste avant la prise
+#  de son instantané d'ancrage.
+#
+#  vazy ne lance PAS sysprep lui-même. Il faudrait démarrer et modifier le
+#  modèle, ce que l'outil s'interdit partout ailleurs — tous les clones
+#  existants casseraient. La procédure se fait à la main, avec le script
+#  invite\windows\sysprep.ps1 ; vazy retient simplement que le modèle est
+#  généralisé, et prévient quand un labo s'apprête à multiplier les clones
+#  d'un modèle Windows qui ne l'est pas.
+# ----------------------------------------------------------------------------
+
+function Set-SysprepModele {
+    param([Parameter(Mandatory = $true)][string]$Alias, [bool]$Generalise)
+    $modele = Get-ModeleDuCatalogue -Alias $Alias
+    if ($Generalise) {
+        $systeme = Get-SystemeModele -Alias $Alias
+        if ($systeme -eq 'linux') {
+            throw (New-ErreurOutil "Le modèle « $Alias » est un Linux : sysprep ne concerne que Windows." `
+                "Sous Linux, l'identité de machine (machine-id, clés SSH) est régénérée à chaque clone par le script guestinfo : rien à faire.")
+        }
+        if ($systeme -ne 'windows') {
+            Publish-Message 'attention' ("le système du modèle « {0} » n'a pas pu être déterminé ; il est marqué généralisé sur votre parole. Pour le préciser : vazy template creds {0} --os windows" -f $Alias)
+        }
+    }
+    $modele['sysprep'] = $Generalise
+    Save-Catalogue
+    if ($Generalise) {
+        Publish-Message 'ok' "Modèle « $Alias » marqué généralisé (sysprep) : ses clones auront des SID distincts."
+        Publish-Message 'info' 'Cela suppose que sysprep a bien été lancé dans le modèle AVANT la prise de son instantané d''ancrage (README, section 4.8).'
+    } else {
+        Publish-Message 'ok' "Modèle « $Alias » marqué non généralisé."
+    }
+}
+
+# Modèles Windows non généralisés dont ce labo tire plusieurs machines : leurs
+# clones partageront le même SID.
+function Get-ModelesNonGeneralisesDuLabo {
+    param($Labo)
+    $compte = @{}
+    foreach ($m in @($Labo.Machines)) {
+        $reel = Resolve-AliasModele -Alias $m.Modele
+        if (-not $compte.ContainsKey($reel)) { $compte[$reel] = 0 }
+        $compte[$reel]++
+    }
+    $resultat = @()
+    foreach ($alias in @($compte.Keys)) {
+        if ($compte[$alias] -lt 2) { continue }
+        if (-not $script:Catalogue['modeles'].Contains($alias)) { continue }
+        if ($script:Catalogue['modeles'][$alias]['sysprep'] -eq $true) { continue }
+        if ((Get-SystemeModele -Alias $alias) -ne 'windows') { continue }
+        $resultat += [pscustomobject]@{ Modele = $alias; Machines = $compte[$alias] }
+    }
+    return $resultat
+}
+
 # Marque un modèle comme embarquant (ou non) le script vazy-guestinfo.
 function Set-MarqueModele {
     param([Parameter(Mandatory = $true)][string]$Alias, [bool]$Guestinfo)
@@ -2588,6 +2662,7 @@ function Add-Modele {
     $fiche['os']         = ''      # système invité, détecté par le pilote ou précisé par « template creds --os »
     $fiche['guestinfo']  = $false  # « vazy template mark <alias> --guestinfo » une fois le script installé dans le modèle
     $fiche['alias']      = @()     # noms standards servis par ce modèle (« vazy template alias »)
+    $fiche['sysprep']    = $false  # « vazy template mark <alias> --sysprep » une fois le modèle généralisé
     $script:Catalogue['modeles'][$Alias] = $fiche
     Save-Catalogue
     # Marque de protection vérifiée par le pilote lui-même (démarrage,

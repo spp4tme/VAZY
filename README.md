@@ -322,6 +322,33 @@ Si vous devez modifier le modèle, par exemple pour une nouvelle version d'un pa
 
 Les anciens clones continuent d'utiliser `base`, les nouveaux partent de `base-2`. Le jour où plus aucun clone ne dépend de `base`, vous pouvez le supprimer dans VMware ; `vazy doctor` vous dit combien de clones dépendent de chaque modèle.
 
+### 4.8 Windows : généraliser avec sysprep, facultatif
+
+**Le problème.** Deux clones d'un même modèle Windows ont le même **SID de machine**. Hors domaine, personne ne s'en aperçoit. Dans un domaine Active Directory — un TP d'AD, typiquement — c'est une autre affaire : Microsoft ne prend pas en charge des machines de même SID sur un domaine, et certaines opérations s'y comportent mal.
+
+**La réponse** est sysprep, lancé **une fois dans le modèle**, tout à la fin de sa préparation, juste avant l'instantané d'ancrage. Chaque clone reçoit alors son propre SID au premier démarrage.
+
+vazy ne lance **pas** sysprep lui-même : il faudrait démarrer et modifier le modèle, ce que l'outil s'interdit partout ailleurs. La procédure se fait à la main, en quatre temps :
+
+1. Préparez le modèle Windows comme d'habitude, **avec** VMware Tools et le script guestinfo ([section 4.3](#43-installer-lauto-configuration-variante-recommandée)). Sans le script, les clones garderaient le nom aléatoire donné par sysprep.
+2. Dans le modèle, en administrateur :
+   ```
+   powershell -ExecutionPolicy Bypass -File <dossier de vazy>\invite\windows\sysprep.ps1
+   ```
+   Le script vérifie les causes classiques d'échec, écrit un fichier de réponses — nom aléatoire, écrans d'accueil sautés, langue et clavier conservés, compteur d'activation préservé — puis lance sysprep. **La machine s'éteint.**
+3. **Ne redémarrez pas le modèle.** Prenez son instantané tout de suite, VM éteinte, puis enregistrez-le : `vazy template add ...`.
+4. Dites-le à vazy : `vazy template mark <alias> --sysprep`.
+
+Dès lors, quand un labo s'apprête à tirer plusieurs machines d'un modèle Windows **non** généralisé, vazy prévient au montage. C'est un avertissement, jamais un refus : hors domaine, des SID identiques ne gênent personne.
+
+**Les limites, franchement.**
+
+- **Faites-le à la préparation du modèle, pas après.** Généraliser un modèle qui a déjà des clones les casse tous : ses disques changent.
+- **Premier démarrage plus long** pour chaque clone : Windows passe par sa phase de spécialisation, puis le script guestinfo le renomme, ce qui coûte un redémarrage de plus.
+- **Causes d'échec connues**, vérifiées par le script quand c'est possible : machine membre d'un domaine, BitLocker actif, et surtout une application du Microsoft Store installée pour un seul utilisateur. Le détail est alors dans `C:\Windows\System32\Sysprep\Panther\setuperr.log`.
+- **La réserve de VM chaudes** ([section 5.6](#56-réserve-de-vm-chaudes)) et sysprep font mauvais ménage : sysprep agit au premier démarrage, que la réserve a justement déjà payé.
+- **Jamais exécuté ici.** Le script et son fichier de réponses sont écrits d'après la documentation de Microsoft ; le XML produit est vérifié par des tests, pas sysprep lui-même. Essayez-le sur un modèle de test avant votre modèle de référence.
+
 ---
 
 ## 5. Créer et gérer des VM
@@ -908,7 +935,7 @@ Dans un fichier de labo, les mêmes clés se déclarent **par machine** — c'es
 
 Ces options exigent un modèle **marqué guestinfo** avec le script d'invité à jour. Sur un modèle en repli par identifiants, vazy prévient et n'applique que le nom d'hôte.
 
-Côté invité, l'application passe par **netplan** (Ubuntu récent) ou **systemd-networkd**, sur la première interface réseau réelle. C'est idempotent : une configuration déjà en place n'est pas réécrite et rien n'est redémarré.
+Côté invité, l'application passe par **netplan** (Ubuntu récent) ou **systemd-networkd**, sur la première interface réseau réelle. **C'est Linux seulement pour l'instant** : sous Windows, le script d'invité applique le nom d'hôte et ignore le reste, sans erreur. C'est idempotent : une configuration déjà en place n'est pas réécrite et rien n'est redémarré.
 
 Sans aucune de ces options, **rien ne change** : la charge utile ne contient que le nom d'hôte, et l'invité reste en DHCP comme avant.
 
@@ -916,7 +943,7 @@ Sans aucune de ces options, **rien ne change** : la charge utile ne contient que
 
 Si la personnalisation échoue, pour quelque raison que ce soit, **la VM reste créée et démarrée**. vazy avertit en donnant la cause et la marche à suivre, mais n'annule rien. Une VM utilisable avec un mauvais nom d'hôte vaut mieux qu'une VM supprimée.
 
-Ce qui n'est pas fait dans cette version : le SID Windows. Le format et le script sont prêts à l'accueillir.
+Le SID Windows, lui, ne relève pas de la personnalisation au démarrage : il se règle une fois pour toutes dans le modèle, par sysprep ([section 4.8](#48-windows--généraliser-avec-sysprep-facultatif)).
 
 ---
 
@@ -1308,7 +1335,7 @@ Ce qui est volontairement hors périmètre :
 - **Adressage fin d'un segment.** `vazy net add` pose l'adresse du réseau et, en option, un serveur DHCP. Le reste — plage DHCP, passerelle, routes — se règle dans le Virtual Network Editor. Voir les [segments réseau isolés](#53-segments-réseau-isolés) pour ce qui est couvert.
 - **Autres hyperviseurs.** Seul VMware Workstation est pris en charge. L'architecture est prête pour VirtualBox et Hyper-V, voir la [section 18](#18-architecture).
 - **Interface graphique.** Aucune, et ce n'est pas prévu.
-- **Identité complète de l'invité.** Le nom d'hôte est appliqué, et un modèle guestinfo régénère les clés SSH du serveur et l'identifiant machine. Restent identiques d'un clone à l'autre : le SID Windows, qui demande `sysprep`, et la configuration IP, qui reste en DHCP.
+- **Identité de l'invité sous Windows.** Le nom d'hôte est appliqué ; l'adressage statique et la clé SSH, eux, ne le sont que sous Linux pour l'instant. Le SID reste identique d'un clone à l'autre tant que le modèle n'a pas été généralisé ([section 4.8](#48-windows--généraliser-avec-sysprep-facultatif)).
 - **Une commande vazy à la fois.** Le catalogue est lu au début de chaque commande et réécrit à la fin. Deux commandes lancées en parallèle dans deux terminaux peuvent s'écraser mutuellement leurs modifications.
 - **Bibliothèque de labos distante.** `lab up <nom>` ne va pas chercher un labo dans un dépôt public. Le format est prêt, le protocole n'existe pas.
 

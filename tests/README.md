@@ -1,6 +1,6 @@
 # Tests de vazy
 
-114 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
+209 tests, qui tournent **sans VMware installé** et sans toucher à vos vraies VM.
 
 ```powershell
 Invoke-Pester -Path .\tests
@@ -37,6 +37,12 @@ Le détail, fichier par fichier :
 | `Logic\Reseaux.Tests.ps1` | Segments isolés : résolution, segment disparu, suppression refusée, export relisible ailleurs |
 | `Logic\Contrat.Tests.ps1` | Les trois pilotes honorent le même contrat, les couches 1-2 ignorent l'hyperviseur, et l'en-tête qui spécifie le contrat reste complet |
 | `Logic\CommandeExterne.Tests.ps1` | Un processus petit-fils qui survit ne bloque pas vazy |
+| `Logic\Pool.Tests.ps1` | Réserve de VM chaudes : ordre créer-démarrer-figer, sortie atomique, VM périmée jamais servie, jamais ramassée par le nettoyage |
+| `Logic\ConfigInvite.Tests.ps1` | Adressage statique : validation avant clonage, charge utile inchangée sans options, export rejouable |
+| `Logic\VueEnsemble.Tests.ps1` | Données de `vazy top` : catalogue relu à chaque tour, pas d'IP demandée pour une VM éteinte |
+| `Logic\Completion.Tests.ps1` | Auto-complétion : bonnes propositions selon la position, jamais d'erreur même sans catalogue |
+| `Logic\Disque.Tests.ps1` | Coût disque : divergence, seuil, bilan avec disques de base comptés une fois |
+| `Logic\Sysprep.Tests.ps1` | Marque sysprep, avertissement au montage d'un labo, fichier de réponses valide |
 | `Integration\LigneDeCommande.Tests.ps1` | Cycle de vie, `--dry-run`, lecture d'un fichier de labo, segments réseau, `doctor` |
 
 ## Comment le faux pilote est branché
