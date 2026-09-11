@@ -66,7 +66,7 @@ function Get-VazyLabos {
 
 $script:VazyCommandes = @(
     'list', 'start', 'stop', 'rm', 'reset', 'snap', 'snaps', 'back', 'unsnap',
-    'gc', 'lab', 'net', 'pool', 'pop', 'top', 'doctor', 'freeze', 'vnc',
+    'gc', 'lab', 'net', 'pool', 'pop', 'top', 'report', 'disk', 'doctor', 'freeze', 'vnc',
     'template', 'config', 'help', 'version'
 )
 
@@ -80,7 +80,7 @@ $script:VazySousCommandes = @{
     'pool'     = @('create', 'status', 'refill', 'destroy')
     'template' = @('add', 'list', 'rm', 'mark', 'alias', 'creds')
     'config'   = @('dossierVms', 'dossierLabos', 'outilHyperviseur', 'espaceDisqueMinGo',
-                   'delaiOutilsSec', 'delaiPoolSec', 'poolReposSec', 'vncPortMin', 'vncPortMax', 'hyperviseur')
+                   'delaiOutilsSec', 'delaiPoolSec', 'poolReposSec', 'seuilDivergencePct', 'vncPortMin', 'vncPortMax', 'hyperviseur')
 }
 
 $script:VazyOptions = @(

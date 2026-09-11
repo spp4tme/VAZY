@@ -274,6 +274,34 @@ Describe 'Integration - rapport HTML' {
     }
 }
 
+Describe 'Integration - cout disque' {
+
+    BeforeEach { Initialize-BacASable }
+
+    It 'affiche le cout de chaque VM' {
+        Invoke-Vazy ubuntu --name poste1 --nostart | Out-Null
+        $r = Invoke-Vazy disk
+        $r.Code | Should Be 0
+        $r.Sortie | Should Match 'poste1'
+    }
+
+    It 'accepte une VM precise et refuse une VM inconnue' {
+        Invoke-Vazy ubuntu --name poste1 --nostart | Out-Null
+        (Invoke-Vazy disk poste1).Code | Should Be 0
+        (Invoke-Vazy disk inconnue).Code | Should Not Be 0
+    }
+
+    It 'accepte le reglage du seuil par vazy config' {
+        (Invoke-Vazy config seuilDivergencePct 30).Code | Should Be 0
+    }
+
+    It 'accepte le reglage de l''attente du pool par vazy config' {
+        # Cles ajoutees au lot 1 : elles doivent etre reglables comme les autres.
+        (Invoke-Vazy config delaiPoolSec 300).Code | Should Be 0
+        (Invoke-Vazy config poolReposSec 30).Code  | Should Be 0
+    }
+}
+
 Describe 'Integration - diagnostic' {
 
     BeforeEach { Initialize-BacASable }

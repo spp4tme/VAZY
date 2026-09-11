@@ -201,6 +201,7 @@ function Get-ConfigParDefaut {
     $c['delaiOutilsSec']    = 120        # attente maximale des outils invité avant de personnaliser (phase 4)
     $c['delaiPoolSec']      = 180        # attente maximale que l'invité s'annonce prêt à être figé (pool)
     $c['poolReposSec']      = 20         # repli : temps laissé à l'invité avant de le figer, faute de poignée de main
+    $c['seuilDivergencePct'] = 50        # au-delà, un clone lié coûte presque une copie complète : à revoir
     $c['vncPortMin']        = 5901       # plage de ports réservée à l'affichage distant des VM
     $c['vncPortMax']        = 5999
     $c['dossierLabos']      = ''         # où sont rangés les fichiers de labo (vide = <données>\labos)
@@ -2685,6 +2686,91 @@ function Set-AliasModele {
 # ----------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------
+#  Coût disque réel des clones (vazy disk)
+#  Un clone lié partage les disques de base de son modèle : ce qu'il coûte
+#  VRAIMENT, c'est son disque de différences, tout ce qui a été écrit depuis sa
+#  création. Un clone qui a beaucoup divergé finit par coûter presque autant
+#  qu'une copie complète, tout en restant fragile — il dépend toujours du
+#  modèle. Il gagnerait à être recréé s'il n'a rien de précieux, ou rendu
+#  autonome (freeze) s'il en a.
+# ----------------------------------------------------------------------------
+
+# Taille réelle des disques de base d'un modèle, en Go (0 si introuvable).
+# Lue dans l'empreinte : ce sont exactement les disques que les clones partagent.
+function Get-TailleBaseModeleGo {
+    param([Parameter(Mandatory = $true)][string]$Alias)
+    if (-not $script:Catalogue['modeles'].Contains($Alias)) { return 0.0 }
+    $chemin = [string]$script:Catalogue['modeles'][$Alias]['chemin']
+    if (-not (Test-Path -LiteralPath $chemin -PathType Leaf)) { return 0.0 }
+    $octets = [long]0
+    try {
+        $empreinte = Get-MachineEmpreinte -Machine $chemin
+        foreach ($k in @($empreinte.Keys)) { $octets += [long]$empreinte[$k]['taille'] }
+    } catch { }
+    return [math]::Round($octets / 1GB, 2)
+}
+
+# Ce que chaque VM coûte sur le disque, et à quel point elle a divergé.
+function Get-CoutDisque {
+    param([string]$Nom = '')
+    Connect-Pilote | Out-Null
+    $seuil = [double]$script:Config['seuilDivergencePct']
+    $bases = @{}      # une lecture d'empreinte par modèle, pas par clone
+    $noms = if ($Nom) { @((Get-VmDuCatalogue -Nom $Nom).Nom) } else { @($script:Catalogue['vms'].Keys) }
+    $liste = @()
+    foreach ($n in $noms) {
+        $vm = Get-VmDuCatalogue -Nom $n
+        $present = Test-Path -LiteralPath $vm.Chemin -PathType Leaf
+        $occupation = @{ Differentiel = 0.0; Suspension = 0.0; Autres = 0.0; Total = 0.0 }
+        if ($present) { try { $occupation = Get-MachineOccupationGo -Machine $vm.Chemin } catch { } }
+        if (-not $bases.ContainsKey($vm.Modele)) { $bases[$vm.Modele] = Get-TailleBaseModeleGo -Alias $vm.Modele }
+        $base = [double]$bases[$vm.Modele]
+        # Une VM autonome n'a plus de modèle : parler de divergence n'a pas de sens.
+        $ratio = 0.0
+        if (-not $vm.Autonome -and $base -gt 0) {
+            $ratio = [math]::Round(([double]$occupation.Differentiel / $base) * 100, 1)
+        }
+        $liste += [pscustomobject]@{
+            Nom            = $vm.Nom
+            Modele         = $vm.Modele
+            Present        = $present
+            Autonome       = $vm.Autonome
+            Pool           = $vm.Pool
+            DifferentielGo = [double]$occupation.Differentiel
+            SuspensionGo   = [double]$occupation.Suspension
+            AutresGo       = [double]$occupation.Autres
+            TotalGo        = [double]$occupation.Total
+            BaseModeleGo   = $base
+            DivergencePct  = $ratio
+            Divergent      = ((-not $vm.Autonome) -and $base -gt 0 -and $ratio -ge $seuil)
+        }
+    }
+    return $liste
+}
+
+# Bilan : ce que les VM occupent, ce que les clones liés auraient coûté en
+# copies complètes, et donc ce que le mécanisme fait réellement gagner.
+function Get-BilanDisque {
+    param($Couts)
+    $liste = @($Couts)
+    $lies = @($liste | Where-Object { -not $_.Autonome })
+    # Les disques de base sont partagés : comptés une fois par modèle.
+    $partage = 0.0
+    foreach ($m in @($lies | ForEach-Object { $_.Modele } | Select-Object -Unique)) {
+        $partage += [double](@($lies | Where-Object { $_.Modele -ieq $m })[0].BaseModeleGo)
+    }
+    $differences = Get-Somme -Objets $lies -Propriete 'DifferentielGo'
+    $copies = (Get-Somme -Objets $lies -Propriete 'BaseModeleGo') + $differences
+    return [pscustomobject]@{
+        OccupeGo          = [math]::Round((Get-Somme -Objets $liste -Propriete 'TotalGo'), 2)
+        PartageGo         = [math]::Round($partage, 2)
+        CopiesCompletesGo = [math]::Round($copies, 2)
+        EconomieGo        = [math]::Round($copies - ($differences + $partage), 2)
+        Divergents        = @($liste | Where-Object { $_.Divergent }).Count
+    }
+}
+
+# ----------------------------------------------------------------------------
 #  Données d'un rapport : tout l'état du parc, en une passe.
 #  La couche 1 se charge de la mise en forme ; ici on ne fait que rassembler.
 # ----------------------------------------------------------------------------
@@ -3335,6 +3421,9 @@ function Get-ConfigAffichable {
         'dossierVms'        = $(if ($script:Config['dossierVms']) { $script:Config['dossierVms'] } else { '(à côté du modèle)' })
         'espaceDisqueMinGo' = $script:Config['espaceDisqueMinGo']
         'delaiOutilsSec'    = $script:Config['delaiOutilsSec']
+        'delaiPoolSec'      = $script:Config['delaiPoolSec']
+        'poolReposSec'      = $script:Config['poolReposSec']
+        'seuilDivergencePct' = $script:Config['seuilDivergencePct']
         'vncPortMin'        = $script:Config['vncPortMin']
         'vncPortMax'        = $script:Config['vncPortMax']
         'dossierLabos'      = $(if ($script:Config['dossierLabos']) { $script:Config['dossierLabos'] } else { (Get-DossierLabos) + '  (défaut)' })
@@ -3386,6 +3475,27 @@ function Set-ConfigValeur {
             }
             $script:Config['delaiOutilsSec'] = $n
         }
+        'delaipoolsec' {
+            $n = 0
+            if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 10 -or $n -gt 1800) {
+                throw (New-ErreurOutil "Valeur invalide pour delaiPoolSec : $Valeur" 'Indiquez un nombre de secondes entre 10 et 1800, par exemple 300 pour un invité lent à démarrer.')
+            }
+            $script:Config['delaiPoolSec'] = $n
+        }
+        'poolrepossec' {
+            $n = 0
+            if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 0 -or $n -gt 600) {
+                throw (New-ErreurOutil "Valeur invalide pour poolReposSec : $Valeur" 'Indiquez un nombre de secondes entre 0 et 600, par exemple 30.')
+            }
+            $script:Config['poolReposSec'] = $n
+        }
+        'seuildivergencepct' {
+            $n = 0
+            if (-not [int]::TryParse($Valeur, [ref]$n) -or $n -lt 1 -or $n -gt 1000) {
+                throw (New-ErreurOutil "Valeur invalide pour seuilDivergencePct : $Valeur" 'Indiquez un pourcentage de la taille du modèle, par exemple 50.')
+            }
+            $script:Config['seuilDivergencePct'] = $n
+        }
         'hyperviseur' {
             $fichier = Join-Path $script:DossierLib ('pilote-' + $Valeur.ToLower() + '.ps1')
             if (-not (Test-Path -LiteralPath $fichier -PathType Leaf)) {
@@ -3395,7 +3505,7 @@ function Set-ConfigValeur {
             $script:Config['hyperviseur'] = $Valeur.ToLower()
         }
         default {
-            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, dossierLabos, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, vncPortMin, vncPortMax, hyperviseur.')
+            throw (New-ErreurOutil "Clé de configuration inconnue : $Cle" 'Clés possibles : dossierVms, dossierLabos, outilHyperviseur, espaceDisqueMinGo, delaiOutilsSec, delaiPoolSec, poolReposSec, seuilDivergencePct, vncPortMin, vncPortMax, hyperviseur.')
         }
     }
     Save-Config

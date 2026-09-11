@@ -1033,6 +1033,7 @@ Tout est dans `%LOCALAPPDATA%\vazy\`, c'est-à-dire `C:\Users\<vous>\AppData\Loc
 | `delaiOutilsSec` | Attente maximale des outils invité, de 5 à 1800 secondes | `120` |
 | `delaiPoolSec` | Attente maximale qu'un invité s'annonce prêt à être figé | `180` |
 | `poolReposSec` | Repli : temps laissé à l'invité avant de le figer, faute de poignée de main | `20` |
+| `seuilDivergencePct` | Au-delà de ce pourcentage de la taille du modèle, `vazy disk` signale un clone à revoir | `50` |
 | `vncPortMin`, `vncPortMax` | Plage de ports réservée aux écrans distants | `5901`, `5999` |
 | `hyperviseur` | Pilote utilisé, c'est-à-dire `lib\pilote-<hyperviseur>.ps1` | `vmware` |
 
@@ -1073,6 +1074,21 @@ Ce qu'il contient : des chiffres clés en tête (VM, en marche, modèles, labos,
 Il est **autonome** : feuille de style intégrée, aucun script, aucune police ni image chargée d'ailleurs. Il s'ouvre hors connexion, chez le correcteur comme chez vous, et suit le thème clair ou sombre du navigateur. Un test vérifie qu'aucune ressource externe ne s'y glisse.
 
 `--dry-run` le prépare sans l'écrire.
+
+### 14.7 Le coût disque réel
+
+```
+vazy disk              # toutes les VM
+vazy disk TP14         # une seule
+```
+
+Un clone lié **partage** les disques de base de son modèle. Ce qu'il coûte vraiment, c'est son disque de différences : tout ce qui a été écrit depuis sa création. `vazy disk` affiche ce coût réel pour chaque VM, sa nature (clone lié, complète, réserve), la mémoire figée d'une VM suspendue, et sa **divergence** — ses différences rapportées à la taille du modèle.
+
+En bas, le bilan : ce que les VM occupent, les disques de base partagés (comptés une seule fois par modèle), et ce que les mêmes machines auraient pris en copies complètes. C'est le gain concret des clones liés, chiffré sur votre parc.
+
+**Un clone qui a trop divergé** — au-delà de 50 % de la taille de son modèle par défaut, réglable par `vazy config seuilDivergencePct` — est marqué *à revoir* : il coûte presque une copie complète tout en restant dépendant du modèle, donc fragile. Deux issues : le recréer s'il n'a rien de précieux (`vazy rm` puis `vazy <modele>`), ou le rendre autonome s'il en a (`vazy freeze`). Le rapport HTML porte la même marque.
+
+Une VM rendue autonome n'a plus de modèle : on ne lui calcule pas de divergence.
 
 Deux variables d'environnement, utiles pour les essais :
 
@@ -1115,6 +1131,7 @@ Deux variables d'environnement, utiles pour les essais :
 |---|---|
 | `vazy top` | Vue qui se rafraîchit ; flèches, `s`/`x`/`r` pour agir, `q` pour sortir |
 | `vazy report [--out <fichier.html>]` | Rapport HTML autonome du parc |
+| `vazy disk [<nom>]` | Coût disque réel de chaque clone, et ceux qui ont trop divergé |
 
 **Instantanés**
 

@@ -34,11 +34,18 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
 - **`vazy report`** : rapport HTML autonome du parc — aucune ressource
   externe, il s'ouvre hors connexion.
 - `Get-MachineAdresseIp` au contrat du pilote.
+- **`vazy disk`** : coût disque réel de chaque clone (son disque de
+  différences), divergence par rapport au modèle, et bilan de ce que les
+  clones liés font économiser. Les clones trop divergents sont signalés, aussi
+  dans le rapport HTML. Seuil réglable : `seuilDivergencePct`.
 
 ### Corrigé
 
 - `Measure-Object -Sum` sur une collection vide faisait tomber le rapport :
   voir `Get-Somme` et PIEGES.
+- `vazy config delaiPoolSec` et `vazy config poolReposSec` étaient refusés
+  (« clé inconnue ») : les clés avaient été ajoutées aux valeurs par défaut
+  sans être déclarées au réglage. Elles apparaissent aussi dans `vazy config`.
 
 ## [1.9.0] — 2026-09-10
 

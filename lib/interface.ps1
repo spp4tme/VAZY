@@ -131,6 +131,8 @@ USAGE
                                      IP ; flèches pour choisir, s/x/r pour agir, q pour sortir
   vazy report [--out <fichier.html>] un rapport HTML autonome du parc : VM, modèles et leurs
                                      clones, labos, réserve, segments, espace occupé
+  vazy disk [<nom>]                  ce que chaque clone coûte vraiment sur le disque, et
+                                     ceux qui ont trop divergé de leur modèle
   vazy net list                      segments réseau personnalisés déclarés, et leurs VM
   vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
                                      crée un segment isolé (droits administrateur requis
@@ -979,6 +981,37 @@ function Invoke-CommandeUnsnap {
     Remove-InstantaneVm -Nom $nom -Libelle $libelle | Out-Null
 }
 
+# vazy disk [<nom>] : ce que chaque VM coûte vraiment sur le disque.
+function Invoke-CommandeDisk {
+    param($Analyse)
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 2
+    $nom = if ($Analyse.Positionnels.Count -ge 2) { $Analyse.Positionnels[1] } else { '' }
+    $couts = @(Get-CoutDisque -Nom $nom)
+    if ($couts.Count -eq 0) {
+        Write-Host 'Aucune VM au catalogue.' -ForegroundColor Gray
+        return
+    }
+    $tab = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($c in @($couts | Sort-Object TotalGo -Descending)) {
+        $nature = if (-not $c.Present) { 'absente' } elseif ($c.Autonome) { 'complète' } elseif ($c.Pool) { 'réserve' } else { 'clone lié' }
+        $divergence = if ($c.Autonome -or $c.BaseModeleGo -le 0) { '-' } else { '{0:0.#} %' -f $c.DivergencePct }
+        $tab.Add(@($c.Nom, $c.Modele, $nature, ('{0:0.##} Go' -f $c.DifferentielGo), ('{0:0.##} Go' -f $c.SuspensionGo),
+                   ('{0:0.##} Go' -f $c.TotalGo), $divergence, $(if ($c.Divergent) { 'à revoir' } else { '' })))
+    }
+    Write-Tableau -EnTetes @('VM', 'Modèle', 'Nature', 'Différences', 'Mémoire figée', 'Total', 'Divergence', '') -Lignes $tab.ToArray()
+
+    $b = Get-BilanDisque -Couts $couts
+    Write-Host ''
+    Write-Host ('  Occupé par les VM : {0:0.##} Go, plus {1:0.##} Go de disques de base partagés avec leurs modèles.' -f $b.OccupeGo, $b.PartageGo) -ForegroundColor Gray
+    if ($b.EconomieGo -gt 0) {
+        Write-Host ('  En copies complètes, ces clones auraient pris {0:0.##} Go : les clones liés en font économiser {1:0.##}.' -f $b.CopiesCompletesGo, $b.EconomieGo) -ForegroundColor Green
+    }
+    if ($b.Divergents -gt 0) {
+        Write-Host ('  {0} clone(s) ont écrit plus de {1} % de la taille de leur modèle : ils coûtent presque une copie complète, tout en restant dépendants du modèle.' -f $b.Divergents, $script:Config['seuilDivergencePct']) -ForegroundColor Yellow
+        Write-Host '  Recréez-les s''ils n''ont rien de précieux (vazy rm puis vazy <modele>), ou rendez-les autonomes : vazy freeze <nom>' -ForegroundColor Yellow
+    }
+}
+
 # Échappement HTML. Les noms de VM et les chemins viennent de l'utilisateur :
 # un « & » ou un « < » dans un chemin casserait la page.
 function ConvertTo-Html {
@@ -1063,9 +1096,14 @@ function Invoke-CommandeReport {
     $h.Add('</div>')
 
     # --- VM -----------------------------------------------------------------
+    # Les clones qui ont trop divergé de leur modèle sont signalés : c'est
+    # l'information la plus utile du rapport pour décider d'un ménage.
+    $divergents = @()
+    try { $divergents = @(Get-CoutDisque | Where-Object { $_.Divergent } | ForEach-Object { $_.Nom }) } catch { }
     $lignes = @()
     foreach ($vm in @($d.Vms | Sort-Object Nom)) {
         $marques = @()
+        if ($divergents -contains $vm.Nom) { $marques += 'divergé, à revoir' }
         if ($vm.Ephemere) { $marques += 'éphémère' }
         if ($vm.Autonome) { $marques += 'autonome' }
         if ($vm.Labo)     { $marques += 'labo ' + $vm.Labo }
@@ -1869,6 +1907,7 @@ try {
             'pop'      { Invoke-CommandePop      -Analyse $analyse }
             'top'      { Invoke-CommandeTop      -Analyse $analyse }
             'report'   { Invoke-CommandeReport   -Analyse $analyse }
+            'disk'     { Invoke-CommandeDisk     -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }
