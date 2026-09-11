@@ -158,6 +158,19 @@ C'est pour cette raison que les fichiers de test chargent la logique au premier
 niveau, et c'est aussi ce qui permet au harnais d'atteindre ses variables
 `$script:`.
 
+### `Measure-Object -Sum` sur une collection vide
+
+```powershell
+(@() | Measure-Object -Property Taille -Sum).Sum   # échoue sous Set-StrictMode
+Get-Somme -Objets @() -Propriete 'Taille'           # 0, correct
+```
+
+Sur une collection vide, `Measure-Object` ne renvoie **rien** — pas un objet
+dont la somme vaudrait zéro. `.Sum` sur ce rien lève « La propriété Sum est
+introuvable ». Rencontré dans `vazy report` sur un parc sans réserve : le
+premier tableau vide faisait tomber tout le rapport. `Get-Somme`, dans la
+logique, règle la question une fois pour toutes.
+
 ### Un scriptblock retient la portée où il a été écrit
 
 Un scriptblock passé à `Set-Afficheur` ou `Set-PiloteObservateur` continue de

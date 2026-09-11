@@ -129,6 +129,8 @@ USAGE
   vazy pool destroy <modele> [--yes] détruit la réserve et libère la place
   vazy top                           vue qui se rafraîchit : toutes les VM, leur état et leur
                                      IP ; flèches pour choisir, s/x/r pour agir, q pour sortir
+  vazy report [--out <fichier.html>] un rapport HTML autonome du parc : VM, modèles et leurs
+                                     clones, labos, réserve, segments, espace occupé
   vazy net list                      segments réseau personnalisés déclarés, et leurs VM
   vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
                                      crée un segment isolé (droits administrateur requis
@@ -977,6 +979,165 @@ function Invoke-CommandeUnsnap {
     Remove-InstantaneVm -Nom $nom -Libelle $libelle | Out-Null
 }
 
+# Échappement HTML. Les noms de VM et les chemins viennent de l'utilisateur :
+# un « & » ou un « < » dans un chemin casserait la page.
+function ConvertTo-Html {
+    param([string]$Texte)
+    if ($null -eq $Texte) { return '' }
+    return ($Texte -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')
+}
+
+function New-LigneHtml {
+    param([string[]]$Cellules, [string]$Classe = '')
+    $tr = if ($Classe) { '<tr class="' + $Classe + '">' } else { '<tr>' }
+    foreach ($c in $Cellules) { $tr += '<td>' + (ConvertTo-Html $c) + '</td>' }
+    return $tr + '</tr>'
+}
+
+function New-TableauHtml {
+    param([string]$Titre, [string[]]$EnTetes, [string[]]$Lignes, [string]$SiVide = 'Rien à afficher.')
+    $h = New-Object System.Collections.Generic.List[string]
+    $h.Add('<h2>' + (ConvertTo-Html $Titre) + '</h2>')
+    if (@($Lignes).Count -eq 0) {
+        $h.Add('<p class="vide">' + (ConvertTo-Html $SiVide) + '</p>')
+        return ($h.ToArray() -join "`n")
+    }
+    $h.Add('<table><thead><tr>')
+    foreach ($e in $EnTetes) { $h.Add('<th>' + (ConvertTo-Html $e) + '</th>') }
+    $h.Add('</tr></thead><tbody>')
+    foreach ($l in $Lignes) { $h.Add($l) }
+    $h.Add('</tbody></table>')
+    return ($h.ToArray() -join "`n")
+}
+
+# vazy report [--out fichier.html] : un seul fichier, sans aucune ressource
+# externe, qu'on peut envoyer par courriel ou joindre à un compte-rendu de TP.
+function Invoke-CommandeReport {
+    param($Analyse)
+    Assert-AucunArgumentEnTrop -Analyse $Analyse -Attendus 1
+    $o = $Analyse.Options
+    $sortie = if ($o.ContainsKey('out')) { $o['out'] } else { 'vazy-rapport.html' }
+    $sortie = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($sortie)
+
+    Write-Host 'vazy : rapport du parc' -ForegroundColor White
+    $d = Get-DonneesRapport
+
+    $totalVm   = [math]::Round((Get-Somme -Objets $d.Vms  -Propriete 'TotalGo'), 2)
+    $totalPool = [math]::Round((Get-Somme -Objets $d.Pool -Propriete 'TotalGo'), 2)
+
+    $h = New-Object System.Collections.Generic.List[string]
+    $h.Add('<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">')
+    $h.Add('<title>vazy - rapport du ' + $d.GenereLe.ToString('yyyy-MM-dd HH:mm') + '</title>')
+    $h.Add('<style>')
+    $h.Add(':root{color-scheme:light dark}')
+    $h.Add('body{font-family:Segoe UI,system-ui,sans-serif;margin:0;padding:2rem;line-height:1.5;background:#fbfbfd;color:#1b1b1f}')
+    $h.Add('h1{font-size:1.6rem;margin:0 0 .25rem}h2{font-size:1.15rem;margin:2rem 0 .5rem;border-bottom:1px solid #d8d8e0;padding-bottom:.25rem}')
+    $h.Add('.sous{color:#5b5b66;margin:0 0 1.5rem}')
+    $h.Add('table{border-collapse:collapse;width:100%;font-size:.9rem;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.06)}')
+    $h.Add('th,td{text-align:left;padding:.45rem .6rem;border-bottom:1px solid #ececf2}')
+    $h.Add('th{background:#f2f2f7;font-weight:600}')
+    $h.Add('tr.marche td:nth-child(2){color:#0a7d33;font-weight:600}')
+    $h.Add('tr.absente td:nth-child(2){color:#b3261e;font-weight:600}')
+    $h.Add('.chiffres{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}')
+    $h.Add('.carte{background:#fff;border:1px solid #e3e3ea;border-radius:8px;padding:.75rem 1rem;min-width:8rem}')
+    $h.Add('.carte .v{font-size:1.5rem;font-weight:600}.carte .l{color:#5b5b66;font-size:.8rem}')
+    $h.Add('.vide{color:#5b5b66;font-style:italic}')
+    $h.Add('footer{margin-top:3rem;color:#5b5b66;font-size:.8rem;border-top:1px solid #d8d8e0;padding-top:.75rem}')
+    $h.Add('@media(prefers-color-scheme:dark){body{background:#131316;color:#e6e6ea}table,.carte{background:#1c1c20;box-shadow:none}th{background:#232329}th,td{border-bottom-color:#2c2c33}h2{border-bottom-color:#2c2c33}.sous,.carte .l,.vide,footer{color:#a0a0ab}.carte{border-color:#2c2c33}}')
+    $h.Add('</style></head><body>')
+
+    $h.Add('<h1>Parc de machines virtuelles</h1>')
+    $h.Add('<p class="sous">' + (ConvertTo-Html ("Généré le {0} sur {1} — vazy {2}, {3}" -f $d.GenereLe.ToString('dddd d MMMM yyyy à HH:mm'), $d.Hote, $d.Version, $d.Hyperviseur)) + '</p>')
+
+    $h.Add('<div class="chiffres">')
+    foreach ($carte in @(
+        @{ V = [string]@($d.Vms).Count;    L = 'VM' },
+        @{ V = [string]@($d.Vms | Where-Object { $_.Etat -eq 'en marche' }).Count; L = 'en marche' },
+        @{ V = [string]@($d.Modeles).Count; L = 'modèles' },
+        @{ V = [string]@($d.Labos).Count;   L = 'labos' },
+        @{ V = [string]@($d.Pool).Count;    L = 'en réserve' },
+        @{ V = ('{0:0.#} Go' -f ($totalVm + $totalPool)); L = 'sur le disque' }
+    )) {
+        $h.Add('<div class="carte"><div class="v">' + (ConvertTo-Html $carte.V) + '</div><div class="l">' + (ConvertTo-Html $carte.L) + '</div></div>')
+    }
+    $h.Add('</div>')
+
+    # --- VM -----------------------------------------------------------------
+    $lignes = @()
+    foreach ($vm in @($d.Vms | Sort-Object Nom)) {
+        $marques = @()
+        if ($vm.Ephemere) { $marques += 'éphémère' }
+        if ($vm.Autonome) { $marques += 'autonome' }
+        if ($vm.Labo)     { $marques += 'labo ' + $vm.Labo }
+        $classe = switch ($vm.Etat) { 'en marche' { 'marche' } 'absente' { 'absente' } default { '' } }
+        $lignes += New-LigneHtml -Classe $classe -Cellules @(
+            $vm.Nom, $vm.Etat, $vm.Modele, ('{0} Go' -f $vm.RamGo), [string]$vm.Cpu, $vm.Reseau,
+            ('{0:0.##} Go' -f $vm.DifferentielGo), ('{0:0.##} Go' -f $vm.TotalGo), ($marques -join ', '), $vm.CreeeLe)
+    }
+    $h.Add((New-TableauHtml -Titre 'Machines virtuelles' -SiVide 'Aucune VM au catalogue.' `
+        -EnTetes @('Nom', 'État', 'Modèle', 'RAM', 'CPU', 'Réseau', 'Différentiel', 'Total disque', 'Marques', 'Créée le') -Lignes $lignes))
+
+    # --- Modèles et leurs clones -------------------------------------------
+    $lignes = @()
+    foreach ($m in @($d.Modeles | Sort-Object Alias)) {
+        $clones = @($d.Vms + $d.Pool | Where-Object { $_.Modele -ieq $m.Alias })
+        $lignes += New-LigneHtml -Classe $(if ($m.Present) { '' } else { 'absente' }) -Cellules @(
+            $m.Alias, $(if ($m.Present) { 'présent' } else { 'INTROUVABLE' }), $m.Instantane,
+            $(if ($m.Guestinfo) { 'guestinfo' } else { 'classique' }),
+            ('{0:0.#} Go' -f $m.DisqueGo), [string]$clones.Count,
+            (@($clones | ForEach-Object { $_.Nom }) -join ', '), $m.Chemin)
+    }
+    $h.Add((New-TableauHtml -Titre 'Modèles et leurs clones' -SiVide 'Aucun modèle enregistré.' `
+        -EnTetes @('Alias', 'État', 'Instantané', 'Personnalisation', 'Disque déclaré', 'Clones', 'Lesquels', 'Chemin') -Lignes $lignes))
+
+    # --- Labos ---------------------------------------------------------------
+    $lignes = @()
+    foreach ($l in @($d.Labos | Sort-Object Nom)) {
+        $lignes += New-LigneHtml -Cellules @($l.Nom, [string]$l.Machines, [string]$l.EnMarche, ('{0:0.##} Go' -f $l.TotalGo))
+    }
+    $h.Add((New-TableauHtml -Titre 'Labos' -SiVide 'Aucun labo monté.' `
+        -EnTetes @('Labo', 'Machines', 'En marche', 'Disque') -Lignes $lignes))
+
+    # --- Réserve -------------------------------------------------------------
+    $lignes = @()
+    foreach ($p in @($d.Pool | Sort-Object Nom)) {
+        $lignes += New-LigneHtml -Cellules @($p.Nom, $p.Pool, ('{0} Go' -f $p.RamGo), [string]$p.Cpu,
+            ('{0:0.##} Go' -f $p.SuspensionGo), ('{0:0.##} Go' -f $p.TotalGo), $p.CreeeLe)
+    }
+    $h.Add((New-TableauHtml -Titre 'Réserve de VM chaudes' -SiVide 'Aucune réserve.' `
+        -EnTetes @('VM', 'Modèle', 'RAM', 'CPU', 'Mémoire figée', 'Total disque', 'Créée le') -Lignes $lignes))
+
+    # --- Segments réseau -----------------------------------------------------
+    $lignes = @()
+    foreach ($r in @($d.Reseaux | Sort-Object Nom)) {
+        $lignes += New-LigneHtml -Cellules @($r.Nom, $r.Identifiant, $(if ($r.Adresse) { $r.Adresse } else { '-' }),
+            $(if ($r.Dhcp) { 'oui' } else { 'non' }), $r.Etat, (@($r.Vms) -join ', '))
+    }
+    $h.Add((New-TableauHtml -Titre 'Segments réseau isolés' -SiVide 'Aucun segment personnalisé.' `
+        -EnTetes @('Segment', 'Identifiant', 'Réseau', 'DHCP', 'État', 'VM branchées') -Lignes $lignes))
+
+    $h.Add('<footer>')
+    $h.Add((ConvertTo-Html ("Hôte : {0}, {1} Go de mémoire{2}." -f $d.Hote, $d.RamHoteGo, $(if ($d.HyperV) { ", Hyper-V actif (hyperviseur en mode dégradé)" } else { '' }))))
+    $h.Add('<br>' + (ConvertTo-Html ('Catalogue : ' + $d.Chemins['Catalogue'])))
+    $h.Add('<br>Fichier autonome : aucune ressource externe, il s''ouvre hors connexion.')
+    $h.Add('</footer></body></html>')
+
+    if (Test-Simulation) {
+        Write-MessageOutil -Type 'simulation' -Message "écriture du rapport $sortie"
+        return
+    }
+    try {
+        $dossier = Split-Path -Parent $sortie
+        if ($dossier -and -not (Test-Path -LiteralPath $dossier)) { New-Item -ItemType Directory -Path $dossier -Force | Out-Null }
+        [System.IO.File]::WriteAllText($sortie, ($h.ToArray() -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        throw (New-ErreurOutil "Impossible d'écrire le rapport $sortie : $($_.Exception.Message)" "Vérifiez le chemin et vos droits d'écriture, ou choisissez un autre fichier : vazy report --out D:\rapport.html")
+    }
+    Write-MessageOutil -Type 'ok' -Message ("rapport écrit : {0} ({1:N0} octets)" -f $sortie, (Get-Item -LiteralPath $sortie).Length)
+    Write-Host ''
+    Write-Host '  Un seul fichier, sans aucune ressource externe : il s''ouvre hors connexion et se joint tel quel à un compte-rendu.' -ForegroundColor Gray
+}
+
 # vazy top : vue qui se rafraîchit, avec sélection au clavier.
 #
 # Pas de service en tâche de fond ni de verrou tenu : à chaque tour la vue
@@ -1120,7 +1281,7 @@ function Invoke-CommandePool {
             }
             Write-Tableau -EnTetes @('VM', 'Modèle', 'État', 'RAM', 'CPU', 'Réseau', 'Mémoire figée', 'Total disque') -Lignes $tab.ToArray()
             $pretes = @($liste | Where-Object { $_.Etat -eq 'prête' }).Count
-            $totalGo = ($liste | Measure-Object -Property TotalGo -Sum).Sum
+            $totalGo = Get-Somme -Objets $liste -Propriete 'TotalGo'
             Write-Host ('  {0} VM prête(s) sur {1}, {2:0.##} Go occupés au total.' -f $pretes, $liste.Count, $totalGo) -ForegroundColor Gray
             if (@($liste | Where-Object { $_.Etat -eq 'périmée' }).Count -gt 0) {
                 Write-Host '  Des VM sont périmées : leur modèle a changé. vazy pool destroy <modele> puis vazy pool create.' -ForegroundColor Yellow
@@ -1707,6 +1868,7 @@ try {
             'pool'     { Invoke-CommandePool     -Analyse $analyse }
             'pop'      { Invoke-CommandePop      -Analyse $analyse }
             'top'      { Invoke-CommandeTop      -Analyse $analyse }
+            'report'   { Invoke-CommandeReport   -Analyse $analyse }
             'doctor'   { $codeSortie = Invoke-CommandeDoctor -Analyse $analyse }
             'freeze'   { Invoke-CommandeFreeze   -Analyse $analyse }
             'vnc'      { Invoke-CommandeVnc      -Analyse $analyse }

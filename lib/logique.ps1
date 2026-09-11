@@ -38,7 +38,7 @@ $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins cou
 $script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
                            'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net',
-                           'pool', 'pop', 'top')
+                           'pool', 'pop', 'top', 'report', 'disk')
 
 # ----------------------------------------------------------------------------
 #  Messages et erreurs
@@ -115,6 +115,18 @@ function New-ErreurOutil {
     $e = New-Object System.Exception($Message)
     $e.Data['Conseil'] = $Conseil
     return $e
+}
+
+# Somme d'une propriété sur une collection, 0 si elle est vide.
+# Measure-Object ne renvoie RIEN sur une collection vide, et « .Sum » sur ce
+# rien échoue sous Set-StrictMode. Le piège se paie une fois par usage.
+function Get-Somme {
+    param($Objets, [Parameter(Mandatory = $true)][string]$Propriete)
+    $liste = @($Objets)
+    if ($liste.Count -eq 0) { return 0.0 }
+    $mesure = $liste | Measure-Object -Property $Propriete -Sum
+    if ($null -eq $mesure -or $null -eq $mesure.Sum) { return 0.0 }
+    return [double]$mesure.Sum
 }
 
 function Format-Duree {
@@ -2671,6 +2683,85 @@ function Set-AliasModele {
 # ----------------------------------------------------------------------------
 #  Configuration
 # ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+#  Données d'un rapport : tout l'état du parc, en une passe.
+#  La couche 1 se charge de la mise en forme ; ici on ne fait que rassembler.
+# ----------------------------------------------------------------------------
+
+function Get-DonneesRapport {
+    Connect-Pilote | Out-Null
+    $enCours = @(Get-MachineEnCours)
+    $infos = Get-InfosHote
+
+    # --- Modèles ------------------------------------------------------------
+    $modeles = @()
+    foreach ($alias in @($script:Catalogue['modeles'].Keys)) {
+        $m = $script:Catalogue['modeles'][$alias]
+        $chemin = [string]$m['chemin']
+        $present = Test-Path -LiteralPath $chemin -PathType Leaf
+        $disqueGo = 0.0
+        if ($present) { try { $disqueGo = [double](Get-MachineDisqueGo -Machine $chemin) } catch { } }
+        $modeles += [pscustomobject]@{
+            Alias = $alias; Chemin = $chemin; Instantane = [string]$m['instantane']
+            Present = $present; Os = [string]$m['os']; Guestinfo = ($m['guestinfo'] -eq $true)
+            Alias2 = @($m['alias']); DisqueGo = $disqueGo; AjouteLe = [string]$m['ajouteLe']
+        }
+    }
+
+    # --- VM, avec leur occupation réelle ------------------------------------
+    $vms = @()
+    foreach ($nom in @($script:Catalogue['vms'].Keys)) {
+        $vm = $script:Catalogue['vms'][$nom]
+        $chemin = [string]$vm['chemin']
+        $present = Test-Path -LiteralPath $chemin -PathType Leaf
+        $marche = $false
+        foreach ($c in $enCours) { if ($c -ieq $chemin) { $marche = $true } }
+        $occupation = @{ Differentiel = 0.0; Suspension = 0.0; Autres = 0.0; Total = 0.0 }
+        if ($present) { try { $occupation = Get-MachineOccupationGo -Machine $chemin } catch { } }
+        $etat = if (-not $present) { 'absente' } elseif ($marche) { 'en marche' } else { 'arrêtée' }
+        $vms += [pscustomobject]@{
+            Nom = $nom; Etat = $etat; Modele = [string]$vm['modele']
+            RamGo = $vm['ramGo']; Cpu = $vm['cpu']; Reseau = (@($vm['reseau']) -join ',')
+            CreeeLe = [string]$vm['creeeLe']; Labo = [string]$vm['labo']; Pool = [string]$vm['pool']
+            Ephemere = ($vm['ephemere'] -eq $true); Autonome = ($vm['autonome'] -eq $true)
+            NomHote = [string]$vm['nomHote']
+            DifferentielGo = [double]$occupation.Differentiel
+            SuspensionGo   = [double]$occupation.Suspension
+            TotalGo        = [double]$occupation.Total
+            Chemin = $chemin
+        }
+    }
+
+    # --- Labos et segments ---------------------------------------------------
+    $labos = @()
+    foreach ($nomLabo in @($vms | Where-Object { $_.Labo } | ForEach-Object { $_.Labo } | Select-Object -Unique)) {
+        $membres = @($vms | Where-Object { $_.Labo -ieq $nomLabo })
+        $labos += [pscustomobject]@{
+            Nom = $nomLabo; Machines = $membres.Count
+            EnMarche = @($membres | Where-Object { $_.Etat -eq 'en marche' }).Count
+            TotalGo = [math]::Round((Get-Somme -Objets $membres -Propriete 'TotalGo'), 2)
+        }
+    }
+
+    $reseaux = @()
+    try { $reseaux = @(Get-ListeReseaux) } catch { }
+
+    return [pscustomobject]@{
+        GenereLe   = (Get-Date)
+        Version    = $script:VersionOutil
+        Hyperviseur = $script:Pilote.Nom
+        Hote       = $env:COMPUTERNAME
+        RamHoteGo  = $infos.RamPhysiqueGo
+        HyperV     = ($infos.HyperviseurPresent -eq $true)
+        Modeles    = $modeles
+        Vms        = @($vms | Where-Object { -not $_.Pool })
+        Pool       = @($vms | Where-Object { $_.Pool })
+        Labos      = $labos
+        Reseaux    = $reseaux
+        Chemins    = Get-CheminsOutil
+    }
+}
 
 # ----------------------------------------------------------------------------
 #  Vue d'ensemble (vazy top)

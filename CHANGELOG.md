@@ -21,6 +21,24 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
   réveil. Un modèle dont le script est plus ancien reste utilisable : vazy
   prévient et retombe sur un délai de repos.
 - Catalogue en version 10 (`vms.<nom>.pool`), migration automatique.
+- **Adressage statique et clé SSH** par guestinfo : `--ip`, `--masque`,
+  `--passerelle`, `--dns`, `--cle-ssh`, et les mêmes clés par machine dans un
+  fichier de labo. Côté invité, netplan ou systemd-networkd, idempotent. Sans
+  ces options, la charge utile reste exactement celle d'avant. Catalogue v11.
+- **`vazy top`** : vue qui se rafraîchit, sélection au clavier, démarrer,
+  arrêter, remettre à zéro. Aucun verrou tenu entre deux tours ; sans console
+  interactive, un instantané puis la main rendue.
+- **Auto-complétion PowerShell** (`outils/completion.ps1`) : VM, modèles,
+  labos, segments et options selon la position. Lit le catalogue sans jamais
+  appeler vazy, et ne lève jamais.
+- **`vazy report`** : rapport HTML autonome du parc — aucune ressource
+  externe, il s'ouvre hors connexion.
+- `Get-MachineAdresseIp` au contrat du pilote.
+
+### Corrigé
+
+- `Measure-Object -Sum` sur une collection vide faisait tomber le rapport :
+  voir `Get-Somme` et PIEGES.
 
 ## [1.9.0] — 2026-09-10
 

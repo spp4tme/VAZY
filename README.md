@@ -1060,6 +1060,20 @@ Aucun service en tâche de fond, aucun verrou tenu : à chaque tour, la vue reli
 
 Sans console interactive — sortie redirigée, script, tâche planifiée — `vazy top` affiche un instantané et rend la main, au lieu de boucler indéfiniment.
 
+### 14.6 Le rapport HTML
+
+```
+vazy report --out D:\TP14\parc.html
+```
+
+Un **seul fichier**, qu'on envoie par courriel ou qu'on joint à un compte-rendu de TP. Sans `--out`, il s'appelle `vazy-rapport.html` dans le dossier courant.
+
+Ce qu'il contient : des chiffres clés en tête (VM, en marche, modèles, labos, réserve, place occupée), puis un tableau par sujet — les VM avec leur état et leur place **réelle** sur le disque, chaque modèle avec **la liste de ses clones**, les labos, la réserve de VM chaudes, et les segments réseau avec les VM qui y sont branchées.
+
+Il est **autonome** : feuille de style intégrée, aucun script, aucune police ni image chargée d'ailleurs. Il s'ouvre hors connexion, chez le correcteur comme chez vous, et suit le thème clair ou sombre du navigateur. Un test vérifie qu'aucune ressource externe ne s'y glisse.
+
+`--dry-run` le prépare sans l'écrire.
+
 Deux variables d'environnement, utiles pour les essais :
 
 - `VAZY_HOME` : un autre dossier pour la configuration et le catalogue, pratique pour tester sans toucher à son installation.
@@ -1094,6 +1108,13 @@ Deux variables d'environnement, utiles pour les essais :
 | `vazy pool status [<modele>]` | Stock, état de chaque VM, place occupée |
 | `vazy pool refill <modele> [--size <n>]` | Complète la réserve |
 | `vazy pool destroy <modele> [--yes]` | Détruit la réserve |
+
+**Vue d'ensemble** — voir [section 14.5](#145-la-vue-temps-réel) et [14.6](#146-le-rapport-html)
+
+| Commande | Effet |
+|---|---|
+| `vazy top` | Vue qui se rafraîchit ; flèches, `s`/`x`/`r` pour agir, `q` pour sortir |
+| `vazy report [--out <fichier.html>]` | Rapport HTML autonome du parc |
 
 **Instantanés**
 

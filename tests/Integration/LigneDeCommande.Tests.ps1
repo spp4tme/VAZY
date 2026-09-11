@@ -236,6 +236,44 @@ Describe 'Integration - vue temps reel' {
     }
 }
 
+Describe 'Integration - rapport HTML' {
+
+    BeforeEach { Initialize-BacASable }
+
+    It 'ecrit un fichier autonome, sans aucune ressource externe' {
+        Invoke-Vazy ubuntu --name poste1 --nostart | Out-Null
+        $cible = Join-Path (Get-RacineTest) 'rapport.html'
+
+        $r = Invoke-Vazy report --out $cible
+        $r.Code | Should Be 0
+        (Test-Path -LiteralPath $cible) | Should Be $true
+
+        $html = [IO.File]::ReadAllText($cible, [Text.Encoding]::UTF8)
+        $html | Should Match '<!DOCTYPE html>'
+        $html | Should Match 'poste1'
+        $html | Should Match 'ubuntu'
+        # Un rapport qu'on joint a un compte-rendu doit s'ouvrir hors connexion.
+        $html | Should Not Match '<script'
+        $html | Should Not Match 'src="http'
+        $html | Should Not Match 'href="http'
+        $html | Should Not Match '<link'
+    }
+
+    It 'produit un rapport meme sans aucune VM' {
+        $cible = Join-Path (Get-RacineTest) 'vide.html'
+        $r = Invoke-Vazy report --out $cible
+        $r.Code | Should Be 0
+        ([IO.File]::ReadAllText($cible, [Text.Encoding]::UTF8)) | Should Match 'Aucune VM'
+    }
+
+    It 'n''ecrit rien en simulation' {
+        $cible = Join-Path (Get-RacineTest) 'jamais.html'
+        $r = Invoke-Vazy report --out $cible --dry-run
+        $r.Code | Should Be 0
+        (Test-Path -LiteralPath $cible) | Should Be $false
+    }
+}
+
 Describe 'Integration - diagnostic' {
 
     BeforeEach { Initialize-BacASable }
