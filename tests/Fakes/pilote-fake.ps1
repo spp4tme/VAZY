@@ -45,7 +45,7 @@ function Reset-PiloteFake {
         OutilsRepondent = $true    # ce que renvoie Wait-MachineOutils
         InvitePoolRepond = $true   # l'invité honore-t-il la poignée de main du pool ?
         CodeScript      = 0        # ce que renvoie Invoke-MachineScript
-        Observateur     = { param($Type, $Message) }
+        Observateur     = { param($Type, $Message) $null = $Type, $Message }
         Simulation      = $false
     }
 }
@@ -472,7 +472,7 @@ function Invoke-MachineScript {
     )
     # Le mot de passe n'est volontairement pas journalisé : le contrat interdit
     # qu'il apparaisse où que ce soit, et un test le vérifie.
-    Write-AppelFake 'Invoke-MachineScript' @{ Machine = $Machine; Utilisateur = $Identifiants.UserName; Systeme = $Systeme; Script = $Script }
+    Write-AppelFake 'Invoke-MachineScript' @{ Machine = $Machine; Utilisateur = $Identifiants.UserName; Systeme = $Systeme; Script = $Script; Tentatives = $Tentatives }
     return $global:VazyFake.CodeScript
 }
 

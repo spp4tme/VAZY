@@ -86,7 +86,11 @@ Describe 'Nettoyage - ce qui ne doit JAMAIS etre supprime' {
         1..4 | ForEach-Object { New-VmEphemereTest -Nom ('jetable' + $_) | Out-Null }
 
         # Pas de -Forcer, et le confirmateur repond non.
-        $supprimees = @(Invoke-Nettoyage -Confirmer { param($noms) return $false })
+        # Le confirmateur note ce qu'on lui soumet : les quatre VM doivent lui
+        # avoir ete presentees, pas seulement la question posee.
+        $script:Soumises = @()
+        $supprimees = @(Invoke-Nettoyage -Confirmer { param($noms) $script:Soumises = @($noms); return $false })
+        $script:Soumises.Count | Should Be 4
 
         $supprimees.Count | Should Be 0
         @(Get-ListeVms).Count | Should Be 4
@@ -98,7 +102,8 @@ Describe 'Nettoyage - ce qui ne doit JAMAIS etre supprime' {
     It 'supprime au-dela du seuil si la confirmation est donnee' {
         1..4 | ForEach-Object { New-VmEphemereTest -Nom ('jetable' + $_) | Out-Null }
 
-        $supprimees = @(Invoke-Nettoyage -Confirmer { param($noms) return $true })
+        # N'accorde que si on lui soumet exactement les quatre VM attendues.
+        $supprimees = @(Invoke-Nettoyage -Confirmer { param($noms) return (@($noms).Count -eq 4) })
 
         $supprimees.Count | Should Be 4
         @(Get-ListeVms).Count | Should Be 0

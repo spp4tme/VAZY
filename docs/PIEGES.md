@@ -295,6 +295,27 @@ Le message affiché quand aucun segment n'existe cite `labo-dmz` en exemple. Un
 test qui vérifiait l'absence de `labo-dmz` après suppression passait donc… tant
 qu'il n'y avait rien. Vérifier le signal, pas un nom qui traîne ailleurs.
 
+### Un contrôle de la CI qu'on ne peut pas lancer chez soi
+
+Le job PSScriptAnalyzer n'a jamais pu tourner sur la machine de
+développement : le fournisseur NuGet demande des droits administrateur, donc
+`Install-Module` échouait. Le job est resté rouge sans que personne ne le
+voie. La première analyse locale a trouvé **65 avertissements bloquants** :
+
+- 50 `catch { }` volontaires — journal qui ne doit jamais bloquer, sonde qui
+  échoue et vaut « inconnu » ;
+- 13 paramètres jamais lus, dont 8 dans des scriptblocks : les observateurs
+  muets par défaut, `{ param($Type, $Message) }`. La règle
+  `PSReviewUnusedParameter` examine **aussi les scriptblocks anonymes**, pas
+  seulement les fonctions ;
+- un verbe non approuvé (`Ecrire-Journal`) ;
+- une fonction qui écrasait une cmdlet intégrée : `ConvertTo-Html`, définie
+  dans l'interface pour le rapport, masquait celle de PowerShell.
+
+La leçon : un contrôle de CI qu'on ne sait pas reproduire en local échoue en
+silence. Le module s'obtient sans installation — voir CONTRIBUTING,
+« Lancer l'analyse de la CI ».
+
 ---
 
 ## 7. Ce qui reste hors de portée des tests

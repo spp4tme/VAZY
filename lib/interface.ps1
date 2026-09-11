@@ -1022,7 +1022,7 @@ function Invoke-CommandeDisk {
 
 # Échappement HTML. Les noms de VM et les chemins viennent de l'utilisateur :
 # un « & » ou un « < » dans un chemin casserait la page.
-function ConvertTo-Html {
+function ConvertTo-TexteHtml {
     param([string]$Texte)
     if ($null -eq $Texte) { return '' }
     return ($Texte -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')
@@ -1031,20 +1031,20 @@ function ConvertTo-Html {
 function New-LigneHtml {
     param([string[]]$Cellules, [string]$Classe = '')
     $tr = if ($Classe) { '<tr class="' + $Classe + '">' } else { '<tr>' }
-    foreach ($c in $Cellules) { $tr += '<td>' + (ConvertTo-Html $c) + '</td>' }
+    foreach ($c in $Cellules) { $tr += '<td>' + (ConvertTo-TexteHtml $c) + '</td>' }
     return $tr + '</tr>'
 }
 
 function New-TableauHtml {
     param([string]$Titre, [string[]]$EnTetes, [string[]]$Lignes, [string]$SiVide = 'Rien à afficher.')
     $h = New-Object System.Collections.Generic.List[string]
-    $h.Add('<h2>' + (ConvertTo-Html $Titre) + '</h2>')
+    $h.Add('<h2>' + (ConvertTo-TexteHtml $Titre) + '</h2>')
     if (@($Lignes).Count -eq 0) {
-        $h.Add('<p class="vide">' + (ConvertTo-Html $SiVide) + '</p>')
+        $h.Add('<p class="vide">' + (ConvertTo-TexteHtml $SiVide) + '</p>')
         return ($h.ToArray() -join "`n")
     }
     $h.Add('<table><thead><tr>')
-    foreach ($e in $EnTetes) { $h.Add('<th>' + (ConvertTo-Html $e) + '</th>') }
+    foreach ($e in $EnTetes) { $h.Add('<th>' + (ConvertTo-TexteHtml $e) + '</th>') }
     $h.Add('</tr></thead><tbody>')
     foreach ($l in $Lignes) { $h.Add($l) }
     $h.Add('</tbody></table>')
@@ -1088,7 +1088,7 @@ function Invoke-CommandeReport {
     $h.Add('</style></head><body>')
 
     $h.Add('<h1>Parc de machines virtuelles</h1>')
-    $h.Add('<p class="sous">' + (ConvertTo-Html ("Généré le {0} sur {1} — vazy {2}, {3}" -f $d.GenereLe.ToString('dddd d MMMM yyyy à HH:mm'), $d.Hote, $d.Version, $d.Hyperviseur)) + '</p>')
+    $h.Add('<p class="sous">' + (ConvertTo-TexteHtml ("Généré le {0} sur {1} — vazy {2}, {3}" -f $d.GenereLe.ToString('dddd d MMMM yyyy à HH:mm'), $d.Hote, $d.Version, $d.Hyperviseur)) + '</p>')
 
     $h.Add('<div class="chiffres">')
     foreach ($carte in @(
@@ -1099,7 +1099,7 @@ function Invoke-CommandeReport {
         @{ V = [string]@($d.Pool).Count;    L = 'en réserve' },
         @{ V = ('{0:0.#} Go' -f ($totalVm + $totalPool)); L = 'sur le disque' }
     )) {
-        $h.Add('<div class="carte"><div class="v">' + (ConvertTo-Html $carte.V) + '</div><div class="l">' + (ConvertTo-Html $carte.L) + '</div></div>')
+        $h.Add('<div class="carte"><div class="v">' + (ConvertTo-TexteHtml $carte.V) + '</div><div class="l">' + (ConvertTo-TexteHtml $carte.L) + '</div></div>')
     }
     $h.Add('</div>')
 
@@ -1163,8 +1163,8 @@ function Invoke-CommandeReport {
         -EnTetes @('Segment', 'Identifiant', 'Réseau', 'DHCP', 'État', 'VM branchées') -Lignes $lignes))
 
     $h.Add('<footer>')
-    $h.Add((ConvertTo-Html ("Hôte : {0}, {1} Go de mémoire{2}." -f $d.Hote, $d.RamHoteGo, $(if ($d.HyperV) { ", Hyper-V actif (hyperviseur en mode dégradé)" } else { '' }))))
-    $h.Add('<br>' + (ConvertTo-Html ('Catalogue : ' + $d.Chemins['Catalogue'])))
+    $h.Add((ConvertTo-TexteHtml ("Hôte : {0}, {1} Go de mémoire{2}." -f $d.Hote, $d.RamHoteGo, $(if ($d.HyperV) { ", Hyper-V actif (hyperviseur en mode dégradé)" } else { '' }))))
+    $h.Add('<br>' + (ConvertTo-TexteHtml ('Catalogue : ' + $d.Chemins['Catalogue'])))
     $h.Add('<br>Fichier autonome : aucune ressource externe, il s''ouvre hors connexion.')
     $h.Add('</footer></body></html>')
 

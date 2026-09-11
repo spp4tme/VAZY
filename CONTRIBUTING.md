@@ -18,6 +18,28 @@ piège y est noté avec ce qui le révèle et ce qui le corrige : blocage sur le
 tuyaux hérités, angles de PowerShell 5.1, règles des clones liés, comportements
 de VMware, et façons d'écrire un test qui passe pour de mauvaises raisons.
 
+## Lancer l'analyse de la CI
+
+Le job « PSScriptAnalyzer » de la CI échoue sur le moindre avertissement. Faites
+tourner la même analyse avant de pousser — sans rien installer, sans droits
+administrateur ni NuGet :
+
+```powershell
+# Une fois : récupérer le module (paquet signé Microsoft, 14,7 Mo)
+Invoke-WebRequest https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0 -OutFile $env:TEMP\pssa.zip
+Expand-Archive $env:TEMP\pssa.zip $env:TEMP\pssa
+
+# À chaque fois, depuis la racine du dépôt
+Import-Module $env:TEMP\pssa\PSScriptAnalyzer.psd1
+Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+```
+
+Rien affiché = la CI passera ce job. Deux remarques : extrayez sur un chemin
+**court** (les profils de compatibilité ont des noms interminables et heurtent
+la limite de 260 caractères de Windows), et si la politique d'exécution
+refuse le chargement du module, lancez ces lignes dans
+`powershell -ExecutionPolicy Bypass`.
+
 ## La règle des trois couches
 
 C'est la contrainte structurante du projet. Elle n'est pas négociable, parce

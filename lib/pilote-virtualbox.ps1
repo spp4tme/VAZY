@@ -35,7 +35,7 @@ $script:DelaiCommandeSec = 1800
 
 $script:VBoxExe      = $null                          # chemin de VBoxManage.exe
 $script:Simulation   = $false                         # --dry-run
-$script:Observateur  = { param($Type, $Message) }     # journal et simulations
+$script:Observateur  = { param($Type, $Message) $null = $Type, $Message }   # muet tant que la logique n'a pas branché le sien
 $script:NomsMachines = @{}                            # chemin .vbox -> nom VirtualBox (cache du processus)
 $script:ExtensionVnc = $null                          # l'extension VNC est-elle installée ? (calculé une fois)
 
@@ -976,7 +976,7 @@ function New-ReseauNomme {
         $Identifiant = 'vazy-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     }
     if ($Adresse) {
-        & $script:Observateur 'journal' "segment $Identifiant : l'adresse $Adresse est ignorée, un réseau interne VirtualBox n'a pas d'adressage propre (voir docs\PILOTE-VIRTUALBOX.md)"
+        & $script:Observateur 'journal' "segment $Identifiant : l'adresse $Adresse/$Masque est ignorée, un réseau interne VirtualBox n'a pas d'adressage propre (voir docs\PILOTE-VIRTUALBOX.md)"
     }
     if ($Dhcp) {
         & $script:Observateur 'journal' "segment $Identifiant : aucun serveur DHCP n'est fourni sur un réseau interne VirtualBox"

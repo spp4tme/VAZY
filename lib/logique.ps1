@@ -35,7 +35,7 @@ $script:Pilote         = $null      # description renvoyée par Initialize-Pilot
 $script:InfosHote      = $null      # résultat de l'interrogation WMI (une seule fois par exécution)
 $script:RappelHyperVFait = $false   # le rappel court Hyper-V a-t-il déjà été affiché dans cette exécution ?
 $script:ApiCheminsChargee = $false  # API Windows de résolution des chemins courts (chargée à la demande)
-$script:Afficheur      = { param($Type, $Message) }   # remplacé par l'interface
+$script:Afficheur      = { param($Type, $Message) $null = $Type, $Message }   # muet ; remplacé par l'interface
 $script:MotsReserves   = @('list', 'start', 'stop', 'rm', 'template', 'config', 'help', 'version',
                            'reset', 'snap', 'snaps', 'back', 'unsnap', 'gc', 'lab', 'doctor', 'freeze', 'vnc', 'net',
                            'pool', 'pop', 'top', 'report', 'disk')
@@ -1256,7 +1256,7 @@ function Undo-CreationsLabo {
     param([string[]]$Noms, [string]$Labo)
     $liste = @($Noms)
     if ($liste.Count -eq 0) { return }
-    Publish-Message 'attention' ("Montage interrompu : suppression des {0} VM créées par ce « lab up » ({1}). Les VM du labo antérieures à cette commande sont conservées." -f $liste.Count, ($liste -join ', '))
+    Publish-Message 'attention' ("Montage du labo « {2} » interrompu : suppression des {0} VM créées par ce « lab up » ({1}). Les VM du labo antérieures à cette commande sont conservées." -f $liste.Count, ($liste -join ', '), $Labo)
     foreach ($nom in $liste) {
         try { Remove-VmParNom -Nom $nom | Out-Null }
         catch { Publish-Message 'attention' ("« {0} » n'a pas pu être supprimée ({1}). Supprimez-la à la main : vazy rm {0}" -f $nom, $_.Exception.Message) }

@@ -35,7 +35,15 @@
         # Faux positifs systématiques avec le point-source : logique.ps1 pose
         # des variables que interface.ps1 consomme, et l'analyseur examine
         # chaque fichier isolément.
-        'PSUseDeclaredVarsMoreThanAssignments'
+        'PSUseDeclaredVarsMoreThanAssignments',
+
+        # Une cinquantaine de « catch { } » volontaires, tous du même genre :
+        # un journal illisible ne doit jamais empêcher de travailler, une
+        # complétion ne doit jamais écrire d'erreur dans la console, une sonde
+        # (espace disque, IP, état d'une VM) qui échoue vaut « inconnu », pas
+        # un arrêt. Les remplir d'un « $null = $_ » pour faire taire la règle
+        # serait du bruit sans information.
+        'PSAvoidUsingEmptyCatchBlock'
     )
 
     Rules = @{

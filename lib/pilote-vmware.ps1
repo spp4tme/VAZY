@@ -140,7 +140,7 @@ $script:DelaiCommandeSec = 1800
 
 $script:VmrunExe    = $null                          # chemin de vmrun.exe, renseigné par Initialize-Pilote
 $script:Simulation  = $false                         # --dry-run : rien n'est modifié, les commandes sont affichées
-$script:Observateur = { param($Type, $Message) }     # journal et simulations, fourni par la logique
+$script:Observateur = { param($Type, $Message) $null = $Type, $Message }   # muet tant que la logique n'a pas branché le sien
 
 function Set-PiloteObservateur {
     param([scriptblock]$Observateur, [bool]$Simulation = $false)

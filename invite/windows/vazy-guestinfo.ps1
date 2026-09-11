@@ -14,7 +14,7 @@
 $ErrorActionPreference = 'Stop'
 $dossier = 'C:\ProgramData\vazy'
 $journal = Join-Path $dossier 'vazy-guestinfo.log'
-function Ecrire-Journal([string]$Message) {
+function Write-JournalInvite([string]$Message) {
     try { Add-Content -Path $journal -Value ('{0} {1}' -f (Get-Date -Format 's'), $Message) } catch { }
 }
 try { New-Item -ItemType Directory -Path $dossier -Force | Out-Null } catch { }
@@ -35,7 +35,7 @@ if ($uuid) {
             $keygen = 'C:\Windows\System32\OpenSSH\ssh-keygen.exe'
             if (Test-Path $keygen) { try { & $keygen -A 2>$null | Out-Null } catch { } }
             try { Restart-Service sshd -ErrorAction SilentlyContinue } catch { }
-            Ecrire-Journal 'clés du serveur SSH régénérées (nouvelle machine)'
+            Write-JournalInvite 'clés du serveur SSH régénérées (nouvelle machine)'
         }
         Set-Content -Path $fichierUuid -Value $uuid
     }
@@ -43,7 +43,7 @@ if ($uuid) {
 
 # --- 2. Configuration déposée par vazy -----------------------------------------
 $vmtoolsd = Join-Path $env:ProgramFiles 'VMware\VMware Tools\vmtoolsd.exe'
-if (-not (Test-Path $vmtoolsd)) { Ecrire-Journal 'vmtoolsd.exe introuvable : VMware Tools non installés'; exit 0 }
+if (-not (Test-Path $vmtoolsd)) { Write-JournalInvite 'vmtoolsd.exe introuvable : VMware Tools non installés'; exit 0 }
 $brut = ''
 try { $brut = ((& $vmtoolsd --cmd 'info-get guestinfo.vazy_config' 2>$null) | Out-String).Trim() } catch { $brut = '' }
 if (-not $brut -or $brut -like 'No value found*') { exit 0 }
@@ -51,14 +51,14 @@ $config = $null
 try {
     $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($brut))
     $config = ConvertFrom-Json -InputObject $json
-} catch { Ecrire-Journal "charge utile illisible : $brut"; exit 0 }
+} catch { Write-JournalInvite "charge utile illisible : $brut"; exit 0 }
 
 $nom = if ($config.PSObject.Properties['hostname']) { ([string]$config.hostname).Trim() } else { '' }
 if ($nom -and $nom -match '^[A-Za-z0-9]([A-Za-z0-9-]{0,13}[A-Za-z0-9])?$' -and ($env:COMPUTERNAME -ine $nom)) {
     Rename-Computer -NewName $nom -Force
-    Ecrire-Journal "renommée « $env:COMPUTERNAME » -> « $nom », redémarrage"
+    Write-JournalInvite "renommée « $env:COMPUTERNAME » -> « $nom », redémarrage"
     Restart-Computer -Force
 } elseif ($nom -and $env:COMPUTERNAME -ine $nom) {
-    Ecrire-Journal "nom d'hôte refusé : « $nom » (15 caractères max, lettres, chiffres, tirets)"
+    Write-JournalInvite "nom d'hôte refusé : « $nom » (15 caractères max, lettres, chiffres, tirets)"
 }
 exit 0
