@@ -410,7 +410,7 @@ Les commandes :
 | Commande | Effet |
 |---|---|
 | `vazy net list` | Segments déclarés, leur état réel, et les VM branchées dessus |
-| `vazy net add <nom> [--adresse a.b.c.0] [--dhcp]` | Crée un segment |
+| `vazy net add <nom> [--adresse a.b.c.0] [--dhcp] [--hostonly]` | Crée un segment. Synonyme : `create` |
 | `vazy net rm <nom> [--yes]` | Le supprime — refusé si des VM y sont encore branchées |
 
 **Droits administrateur.** Sous VMware, créer ou supprimer un segment passe par `vnetlib`, qui exige une invite de commandes administrateur. Tout le reste de vazy fonctionne sans. Sous VirtualBox, aucun droit particulier : voir [docs/PILOTE-VIRTUALBOX.md](docs/PILOTE-VIRTUALBOX.md).

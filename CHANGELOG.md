@@ -38,6 +38,8 @@ Ce projet suit le [versionnage sémantique](https://semver.org/lang/fr/).
   différences), divergence par rapport au modèle, et bilan de ce que les
   clones liés font économiser. Les clones trop divergents sont signalés, aussi
   dans le rapport HTML. Seuil réglable : `seuilDivergencePct`.
+- `vazy net create` et `vazy net ls`, synonymes de `add` et `list` ; option`n  `--hostonly` acceptée — un segment est host-only par nature, elle ne change
+  rien, elle le dit.
 
 ### Corrigé
 

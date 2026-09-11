@@ -302,6 +302,23 @@ Describe 'Integration - cout disque' {
     }
 }
 
+Describe 'Integration - synonymes des segments' {
+
+    BeforeEach { Initialize-BacASable }
+
+    It 'accepte « create » et « ls », avec --hostonly' {
+        $c = Invoke-Vazy net create dmz --hostonly
+        $c.Code | Should Be 0
+        $l = Invoke-Vazy net ls
+        $l.Code | Should Be 0
+        $l.Sortie | Should Match 'dmz'
+    }
+
+    It 'refuse toujours une sous-commande inconnue' {
+        (Invoke-Vazy net renommer dmz).Code | Should Not Be 0
+    }
+}
+
 Describe 'Integration - diagnostic' {
 
     BeforeEach { Initialize-BacASable }

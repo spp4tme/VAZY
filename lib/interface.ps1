@@ -133,10 +133,11 @@ USAGE
                                      clones, labos, réserve, segments, espace occupé
   vazy disk [<nom>]                  ce que chaque clone coûte vraiment sur le disque, et
                                      ceux qui ont trop divergé de leur modèle
-  vazy net list                      segments réseau personnalisés déclarés, et leurs VM
-  vazy net add <nom> [--adresse 192.168.100.0] [--dhcp]
-                                     crée un segment isolé (droits administrateur requis
-                                     sous VMware)
+  vazy net list                      segments réseau personnalisés déclarés, et leurs VM (ou : ls)
+  vazy net add <nom> [--adresse 192.168.100.0] [--dhcp] [--hostonly]
+                                     crée un segment isolé (ou : create). Droits administrateur
+                                     requis sous VMware. Un segment est host-only par nature :
+                                     --hostonly est accepté pour le dire, il ne change rien
   vazy net rm <nom> [--yes]          supprime un segment (refusé si des VM y sont branchées)
   vazy vnc <nom> [off]               affiche le lien pour voir l'écran de la VM depuis un
                                      téléphone ou un autre poste (l'active si besoin)
@@ -228,7 +229,7 @@ function ConvertFrom-Arguments {
                            'labo', 'prefixe', 'vms', 'delai', 'vm', 'reseau-nomme', 'adresse', 'size', 'out',
                            'ip', 'masque', 'passerelle', 'dns', 'cle-ssh')
     $drapeaux          = @('nogui', 'nostart', 'hard', 'yes', 'help', 'version', 'tmp', 'stop-only', 'rm', 'guestinfo', 'classique',
-                           'dry-run', 'requis', 'tout', 'save', 'dhcp')
+                           'dry-run', 'requis', 'tout', 'save', 'dhcp', 'hostonly')
     $optionsFacultatives = @('vnc')   # « --vnc » ou « --vnc off »
     $resultat = @{
         Positionnels = New-Object 'System.Collections.Generic.List[string]'
@@ -1392,6 +1393,9 @@ function Invoke-CommandePop {
 function Invoke-CommandeNet {
     param($Analyse)
     $sous = if ($Analyse.Positionnels.Count -ge 2) { $Analyse.Positionnels[1].ToLower() } else { 'list' }
+    # Synonymes : « ls » et « create » sont ce que la main tape d'instinct.
+    if ($sous -eq 'ls')     { $sous = 'list' }
+    if ($sous -eq 'create') { $sous = 'add' }
     switch ($sous) {
 
         'list' {
@@ -1441,7 +1445,7 @@ function Invoke-CommandeNet {
         }
 
         default {
-            throw (New-ErreurUsage "Sous-commande inconnue : « $sous ». Usage : vazy net list | add <nom> [--adresse a.b.c.0] [--dhcp] | rm <nom>")
+            throw (New-ErreurUsage "Sous-commande inconnue : « $sous ». Usage : vazy net list|ls | add|create <nom> [--adresse a.b.c.0] [--dhcp] [--hostonly] | rm <nom>")
         }
     }
 }

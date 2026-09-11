@@ -76,7 +76,7 @@ $script:VazyAttendModele = @('pop')
 
 $script:VazySousCommandes = @{
     'lab'      = @('up', 'new', 'status', 'down', 'export')
-    'net'      = @('list', 'add', 'rm')
+    'net'      = @('list', 'ls', 'add', 'create', 'rm')
     'pool'     = @('create', 'status', 'refill', 'destroy')
     'template' = @('add', 'list', 'rm', 'mark', 'alias', 'creds')
     'config'   = @('dossierVms', 'dossierLabos', 'outilHyperviseur', 'espaceDisqueMinGo',
